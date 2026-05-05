@@ -18,14 +18,14 @@ jobs:
           pip install -r requirements.txt
       - name: Compile
         run: |
-          python -m py_compile server.py sysml_docgen/app.py sysml_docgen/config.py sysml_docgen/repository.py sysml_docgen/store.py sysml_docgen/docgen.py sysml_docgen/xmi.py tools/mdk_sync.py
+          python -m py_compile server.py sysml_docgen/app.py sysml_docgen/auth.py sysml_docgen/config.py sysml_docgen/repository.py sysml_docgen/store.py sysml_docgen/docgen.py sysml_docgen/metamodel.py sysml_docgen/xmi.py tools/mdk_sync.py
       - name: Unit tests
         run: |
-          python -B -m unittest discover -s tests
+          python -B -m unittest discover -s tests -v
 
   docker:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: Build image
-        run: docker build -t sysml-docgen:ci .
+        run: docker build --pull -t sysml-docgen:ci .
