@@ -528,11 +528,26 @@ class ModelStore:
                 return commit
         raise NotFoundError(f"提交 {commit_id} 不存在")
 
+    def find_tag(self, project_id: str, tag_id: str) -> dict[str, Any]:
+        project = self.get_project(project_id)
+        normalized_tag_id = slugify(tag_id)
+        for tag in project.get("tags", []):
+            if tag.get("id") == tag_id or tag.get("id") == normalized_tag_id or tag.get("name") == tag_id:
+                return tag
+        raise NotFoundError(f"Tag {tag_id} does not exist")
+
     def snapshot_for_ref(self, project_id: str, branch_name: str, ref: str | None) -> dict[str, Any]:
         branch = self.get_branch(project_id, branch_name)
         if not ref or ref == "working":
             return copy.deepcopy(branch.get("elements", {}))
-        return copy.deepcopy(self.find_commit(project_id, ref).get("snapshot", {}))
+        if ref.startswith("tag:"):
+            tag = self.find_tag(project_id, ref.removeprefix("tag:"))
+            return copy.deepcopy(self.find_commit(project_id, tag.get("commit", "")).get("snapshot", {}))
+        try:
+            return copy.deepcopy(self.find_commit(project_id, ref).get("snapshot", {}))
+        except NotFoundError:
+            tag = self.find_tag(project_id, ref)
+            return copy.deepcopy(self.find_commit(project_id, tag.get("commit", "")).get("snapshot", {}))
 
     def diff_commits(
         self,
@@ -626,11 +641,15 @@ class ModelStore:
         if any(tag.get("id") == tag_id for tag in project.get("tags", [])):
             raise ConflictError(f"标签 {tag_id} 已存在")
         commit_id = payload.get("commit") or next(iter(project.get("commits", [])), {}).get("id", "")
+        commit = self.find_commit(project_id, commit_id) if commit_id else {}
         tag = {
             "id": tag_id,
             "name": payload.get("name", tag_id),
             "commit": commit_id,
             "description": payload.get("description", ""),
+            "author": actor,
+            "model_hash": commit.get("model_hash", ""),
+            "element_count": commit.get("element_count", 0),
             "created_at": utc_now(),
         }
         project.setdefault("tags", []).insert(0, tag)

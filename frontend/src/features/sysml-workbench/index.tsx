@@ -79,6 +79,7 @@ import {
   type Project,
   type Relation,
   type SysmlElement,
+  type Tag,
   type TraceabilityRow,
   type ValidationPayload,
 } from '@/lib/sysml-api'
@@ -286,12 +287,14 @@ export function SysmlWorkbench() {
   >({})
   const [traceability, setTraceability] = useState<TraceabilityRow[]>([])
   const [commits, setCommits] = useState<Commit[]>([])
+  const [tags, setTags] = useState<Tag[]>([])
   const [auditEvents, setAuditEvents] = useState<AuditEvent[]>([])
   const [diff, setDiff] = useState<DiffPayload | null>(null)
   const [diffFrom, setDiffFrom] = useState('working')
   const [diffTo, setDiffTo] = useState('working')
   const [rollbackCommit, setRollbackCommit] = useState('')
   const [newBranch, setNewBranch] = useState('')
+  const [newTag, setNewTag] = useState('')
   const [mergeSource, setMergeSource] = useState('')
   const [forceMerge, setForceMerge] = useState(false)
   const [template, setTemplate] = useState(defaultTemplate)
@@ -456,9 +459,13 @@ export function SysmlWorkbench() {
     if (!projectId) return
     setBusy('version')
     try {
-      const [commitPayload, auditPayload] = await Promise.all([
+      const [commitPayload, tagPayload, auditPayload] = await Promise.all([
         api<{ commits: Commit[] }>(
           `/api/projects/${encodeURIComponent(projectId)}/commits`,
+          { identity, role }
+        ),
+        api<{ tags: Tag[] }>(
+          `/api/projects/${encodeURIComponent(projectId)}/tags`,
           { identity, role }
         ),
         api<{ events: AuditEvent[] }>(
@@ -467,6 +474,7 @@ export function SysmlWorkbench() {
         ),
       ])
       setCommits(commitPayload.commits)
+      setTags(tagPayload.tags)
       setAuditEvents(auditPayload.events)
       setRollbackCommit(commitPayload.commits[0]?.id || '')
       setDiffFrom(commitPayload.commits[1]?.id || commitPayload.commits[0]?.id || 'working')
@@ -753,6 +761,35 @@ export function SysmlWorkbench() {
       await loadProjectBranches()
       await loadElements()
       toast.success('分支已创建')
+    } catch (error) {
+      notifyError(error)
+    } finally {
+      setBusy('')
+    }
+  }
+
+  async function createTag() {
+    if (!projectId || !newTag.trim()) return
+    const latestCommit = commits[0]?.id
+    if (!latestCommit) {
+      toast.error('Create a commit before tagging this model state')
+      return
+    }
+    setBusy('tag')
+    try {
+      await api(`/api/projects/${encodeURIComponent(projectId)}/tags`, {
+        method: 'POST',
+        body: JSON.stringify({
+          name: newTag.trim(),
+          commit: latestCommit,
+          description: `Read-only baseline for ${branch}`,
+        }),
+        identity,
+        role,
+      })
+      setNewTag('')
+      await loadVersionData()
+      toast.success(`Tag ${newTag.trim()} created`)
     } catch (error) {
       notifyError(error)
     } finally {
@@ -1130,6 +1167,7 @@ export function SysmlWorkbench() {
                 <VersionTab
                   branches={branches}
                   commits={commits}
+                  tags={tags}
                   auditEvents={auditEvents}
                   diff={diff}
                   diffFrom={diffFrom}
@@ -1140,6 +1178,8 @@ export function SysmlWorkbench() {
                   setRollbackCommit={setRollbackCommit}
                   newBranch={newBranch}
                   setNewBranch={setNewBranch}
+                  newTag={newTag}
+                  setNewTag={setNewTag}
                   mergeSource={mergeSource}
                   setMergeSource={setMergeSource}
                   forceMerge={forceMerge}
@@ -1148,6 +1188,7 @@ export function SysmlWorkbench() {
                   onDiff={runDiff}
                   onRollback={rollback}
                   onCreateBranch={createBranch}
+                  onCreateTag={createTag}
                   onMerge={mergeBranch}
                   busy={busy}
                 />
@@ -2373,6 +2414,7 @@ function TraceTab({
 type VersionTabProps = {
   branches: Branch[]
   commits: Commit[]
+  tags: Tag[]
   auditEvents: AuditEvent[]
   diff: DiffPayload | null
   diffFrom: string
@@ -2383,6 +2425,8 @@ type VersionTabProps = {
   setRollbackCommit: (value: string) => void
   newBranch: string
   setNewBranch: (value: string) => void
+  newTag: string
+  setNewTag: (value: string) => void
   mergeSource: string
   setMergeSource: (value: string) => void
   forceMerge: boolean
@@ -2391,6 +2435,7 @@ type VersionTabProps = {
   onDiff: () => void
   onRollback: () => void
   onCreateBranch: () => void
+  onCreateTag: () => void
   onMerge: () => void
   busy: string
 }
@@ -2398,6 +2443,10 @@ type VersionTabProps = {
 function VersionTab(props: VersionTabProps) {
   const commitOptions = [
     { id: 'working', label: 'working' },
+    ...props.tags.map((tag) => ({
+      id: `tag:${tag.id}`,
+      label: `tag:${tag.name} / ${tag.commit}`,
+    })),
     ...props.commits.map((commit) => ({
       id: commit.id,
       label: `${commit.id} / ${commit.message}`,
@@ -2494,6 +2543,27 @@ function VersionTab(props: VersionTabProps) {
           </div>
           <Separator />
           <div className='grid gap-3'>
+            <Field label='标签快照'>
+              <Input
+                placeholder='PDR-baseline'
+                value={props.newTag}
+                onChange={(event) => props.setNewTag(event.target.value)}
+              />
+            </Field>
+            <Button
+              variant='outline'
+              onClick={props.onCreateTag}
+              disabled={props.busy === 'tag'}
+            >
+              <FileText className='size-4' />
+              创建标签
+            </Button>
+            <p className='text-xs text-muted-foreground'>
+              标签对应 OpenMBEE 的只读基线，用于冻结已提交的模型状态。
+            </p>
+          </div>
+          <Separator />
+          <div className='grid gap-3'>
             <Field label='合并来源'>
               <Select value={props.mergeSource} onValueChange={props.setMergeSource}>
                 <SelectTrigger className='w-full'>
@@ -2571,7 +2641,42 @@ function VersionTab(props: VersionTabProps) {
           </CardContent>
         </Card>
 
-        <div className='grid gap-4 xl:grid-cols-2'>
+        <div className='grid gap-4 xl:grid-cols-3'>
+          <Card>
+            <CardHeader>
+              <CardTitle>标签基线</CardTitle>
+              <CardDescription>{props.tags.length} 个只读快照</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <ScrollArea className='h-[320px]'>
+                <div className='space-y-3'>
+                  {props.tags.length ? (
+                    props.tags.map((tag) => (
+                      <div key={tag.id} className='rounded-md border p-3'>
+                        <div className='flex items-center justify-between gap-2'>
+                          <div className='font-mono text-sm font-semibold'>
+                            {tag.name}
+                          </div>
+                          <Badge variant='secondary'>tag</Badge>
+                        </div>
+                        <p className='mt-1 text-xs text-muted-foreground'>
+                          {tag.commit} / {tag.created_at}
+                        </p>
+                        <p className='mt-1 text-xs text-muted-foreground'>
+                          {tag.element_count ?? '-'} elements / {tag.model_hash || '-'}
+                        </p>
+                      </div>
+                    ))
+                  ) : (
+                    <EmptyState
+                      title='暂无标签'
+                      description='创建标签后可在 Diff 中作为只读基线选择'
+                    />
+                  )}
+                </div>
+              </ScrollArea>
+            </CardContent>
+          </Card>
           <Card>
             <CardHeader>
               <CardTitle>提交记录</CardTitle>
@@ -2662,6 +2767,10 @@ type DocgenTabProps = {
 }
 
 function DocgenTab(props: DocgenTabProps) {
+  const viewOutline = useMemo(() => buildViewOutline(props.template), [
+    props.template,
+  ])
+
   return (
     <div className='grid gap-4 xl:grid-cols-[minmax(360px,0.42fr)_minmax(560px,0.58fr)]'>
       <Card>
@@ -2716,6 +2825,32 @@ function DocgenTab(props: DocgenTabProps) {
           </div>
           <Separator />
           <div>
+            <h3 className='mb-2 text-sm font-semibold'>View Outline</h3>
+            <div className='mb-4 rounded-md border bg-muted/30 p-3'>
+              {viewOutline.length ? (
+                <div className='space-y-2'>
+                  {viewOutline.map((view) => (
+                    <div
+                      key={`${view.level}-${view.title}`}
+                      className={cn(
+                        'flex items-center gap-2 text-sm',
+                        view.level > 2 && 'pl-4 text-muted-foreground'
+                      )}
+                    >
+                      <FileText className='size-4 text-muted-foreground' />
+                      <span className='truncate'>{view.title}</span>
+                      <Badge variant='outline' className='ms-auto'>
+                        h{view.level}
+                      </Badge>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className='text-sm text-muted-foreground'>
+                  Add Markdown headings to define document views.
+                </p>
+              )}
+            </div>
             <h3 className='mb-2 text-sm font-semibold'>历史文档</h3>
             <ScrollArea className='h-[220px] rounded-md border'>
               {props.documents.length ? (
@@ -2792,6 +2927,17 @@ function tabFromHash(hash: string): WorkbenchTab {
   return workbenchTabs.includes(value as WorkbenchTab)
     ? (value as WorkbenchTab)
     : 'model'
+}
+
+function buildViewOutline(template: string) {
+  return template
+    .split(/\r?\n/)
+    .map((line) => line.match(/^(#{1,4})\s+(.+)$/))
+    .filter((match): match is RegExpMatchArray => Boolean(match))
+    .map((match) => ({
+      level: match[1].length,
+      title: match[2].trim(),
+    }))
 }
 
 function EmptyState({

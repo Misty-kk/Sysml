@@ -22,6 +22,17 @@ export type Branch = {
   created_at?: string
 }
 
+export type Tag = {
+  id: string
+  name: string
+  commit: string
+  description?: string
+  created_at: string
+  author?: string
+  model_hash?: string
+  element_count?: number
+}
+
 export type Relation = {
   type: string
   target: string
@@ -123,6 +134,7 @@ export type Commit = {
   author: string
   created_at: string
   element_count: number
+  model_hash?: string
 }
 
 export type AuditEvent = {
