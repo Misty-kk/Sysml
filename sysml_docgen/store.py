@@ -6,6 +6,7 @@ import copy
 import json
 import re
 import sqlite3
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -50,8 +51,17 @@ class ModelStore:
         connection.row_factory = sqlite3.Row
         return connection
 
+    @contextmanager
+    def connection(self) -> Any:
+        connection = self.connect()
+        try:
+            yield connection
+            connection.commit()
+        finally:
+            connection.close()
+
     def _init_db(self) -> None:
-        with self.connect() as connection:
+        with self.connection() as connection:
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS state (
@@ -98,7 +108,7 @@ class ModelStore:
             )
 
     def _load(self) -> dict[str, Any]:
-        with self.connect() as connection:
+        with self.connection() as connection:
             row = connection.execute("SELECT payload FROM state WHERE key = 'model'").fetchone()
             if row:
                 data = json.loads(row["payload"])
@@ -162,7 +172,7 @@ class ModelStore:
 
     def save(self) -> None:
         payload = json.dumps(self.data, ensure_ascii=False, indent=2)
-        with self.connect() as connection:
+        with self.connection() as connection:
             connection.execute(
                 """
                 INSERT INTO state(key, payload, updated_at)
@@ -203,7 +213,7 @@ class ModelStore:
         element_id: str | None = None,
         detail: dict[str, Any] | None = None,
     ) -> None:
-        with self.connect() as connection:
+        with self.connection() as connection:
             connection.execute(
                 """
                 INSERT INTO audit_events(project_id, branch_name, action, actor, element_id, created_at, detail)
@@ -222,7 +232,7 @@ class ModelStore:
 
     def list_audit(self, project_id: str, limit: int = 80) -> list[dict[str, Any]]:
         self.get_project(project_id)
-        with self.connect() as connection:
+        with self.connection() as connection:
             rows = connection.execute(
                 """
                 SELECT id, project_id, branch_name, action, actor, element_id, created_at, detail
@@ -341,7 +351,7 @@ class ModelStore:
             q = f"%{query.lower()}%"
             params.extend([q, q, q])
         sql += " ORDER BY element_type, element_id"
-        with self.connect() as connection:
+        with self.connection() as connection:
             rows = connection.execute(sql, params).fetchall()
         return [json.loads(row["payload"]) for row in rows]
 
@@ -421,14 +431,18 @@ class ModelStore:
         actor: str = "engineer",
     ) -> dict[str, Any]:
         source_format = str(payload.get("format", "json")).lower()
+        mapping_report = payload.get("mapping_report") or payload.get("report")
         is_xmi_import = source_format == "xmi" or payload.get("xmi")
-        if is_xmi_import:
+        provided_elements = payload.get("elements")
+        if is_xmi_import and provided_elements is not None:
+            elements = provided_elements
+        elif is_xmi_import:
             xmi_text = payload.get("xmi") or payload.get("content") or payload.get("text") or ""
             if not isinstance(xmi_text, str) or not xmi_text.strip():
                 raise StoreError("XMI 导入数据不能为空")
             elements = parse_xmi_elements(xmi_text)
         else:
-            elements = payload.get("elements")
+            elements = provided_elements
         if isinstance(elements, dict):
             iterable = elements.values()
         elif isinstance(elements, list):
@@ -436,25 +450,21 @@ class ModelStore:
         else:
             raise StoreError("导入数据需要 elements 数组或对象")
         imported = []
-        if is_xmi_import:
-            parsed_elements = [copy.deepcopy(element) for element in iterable]
-            for element in parsed_elements:
-                element_without_relations = copy.deepcopy(element)
-                element_without_relations["relations"] = []
-                self.upsert_element(project_id, branch_name, element_without_relations, actor)
-            for element in parsed_elements:
-                imported.append(self.upsert_element(project_id, branch_name, element, actor))
-        else:
-            for element in iterable:
-                imported.append(self.upsert_element(project_id, branch_name, element, actor))
+        parsed_elements = [copy.deepcopy(element) for element in iterable]
+        for element in parsed_elements:
+            element_without_relations = copy.deepcopy(element)
+            element_without_relations["relations"] = []
+            self.upsert_element(project_id, branch_name, element_without_relations, actor)
+        for element in parsed_elements:
+            imported.append(self.upsert_element(project_id, branch_name, element, actor))
         self.record_audit(
             project_id,
             branch_name,
             "import_elements",
             actor,
-            detail={"count": len(imported), "format": source_format},
+            detail={"count": len(imported), "format": source_format, "mapping_report": mapping_report},
         )
-        return {"imported": len(imported), "format": source_format, "elements": imported}
+        return {"imported": len(imported), "format": source_format, "elements": imported, "mapping_report": mapping_report}
 
     def export_branch(self, project_id: str, branch_name: str) -> dict[str, Any]:
         project = self.get_project(project_id)
@@ -794,4 +804,3 @@ def enforce_role(method: str, role: str) -> None:
             raise ForbiddenError("当前角色没有读取权限")
     elif normalized not in {"admin", "author"}:
         raise ForbiddenError("当前角色没有写入权限")
- 
