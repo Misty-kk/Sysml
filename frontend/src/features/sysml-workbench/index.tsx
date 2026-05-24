@@ -1,10 +1,11 @@
-import {
+﻿import {
   useCallback,
   useEffect,
   lazy,
   useMemo,
   Suspense,
   useState,
+  type ChangeEvent,
   type FormEvent,
   type ReactNode,
 } from 'react'
@@ -50,20 +51,30 @@ import {
   Loader2,
   LogIn,
   LogOut,
+  MessageCircle,
   Network,
   Plus,
   RefreshCw,
   RotateCcw,
   Save,
   Search,
+  Send,
   ShieldCheck,
+  Sparkles,
   Trash2,
+  Upload,
   UserCircle,
   Workflow,
+  Wrench,
 } from 'lucide-react'
 import { toast } from 'sonner'
 import {
   api,
+  type AiDocgenDraft,
+  type AiDocgenMode,
+  type AiChatMessage,
+  type AiChatResponse,
+  type AiModelReview,
   defaultElement,
   loadIdentity,
   login,
@@ -75,6 +86,10 @@ import {
   type DiffPayload,
   type DocumentRecord,
   type Identity,
+  type MappingReport,
+  type MdkAdapter,
+  type MdkImportJob,
+  type MdkParseResponse,
   type Metamodel,
   type Project,
   type Relation,
@@ -82,6 +97,7 @@ import {
   type Tag,
   type TraceabilityRow,
   type ValidationPayload,
+  type ViewPayload,
 } from '@/lib/sysml-api'
 import { cn } from '@/lib/utils'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
@@ -106,6 +122,14 @@ import {
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { ScrollArea } from '@/components/ui/scroll-area'
+import {
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetHeader,
+  SheetTitle,
+  SheetTrigger,
+} from '@/components/ui/sheet'
 import {
   Select,
   SelectContent,
@@ -159,6 +183,26 @@ const defaultTemplate = `# {{model:summary}}
 {{validation:issues}}
 `
 
+const sampleMdkJson = JSON.stringify(
+  {
+    elements: [
+      {
+        id: 'REQ-MDK-001',
+        name: '外部工具导入需求',
+        type: 'Requirement',
+        stereotype: 'requirement',
+        attributes: {
+          text: '系统应支持从外部建模工具导入模型元素。',
+          verification: 'Review',
+        },
+        relations: [],
+      },
+    ],
+  },
+  null,
+  2
+)
+
 const typeNames: Record<string, string> = {
   Requirement: '需求',
   Block: '模块',
@@ -200,6 +244,7 @@ const displayDiagramNames: Record<string, string> = {
   requirements: 'Requirements Trace',
   structure: 'Structure & Interface',
   behavior: 'Behavior & State',
+  views: 'View-Focused Graph',
   all: 'Full Model Graph',
 }
 
@@ -222,7 +267,7 @@ const severityLabels = {
   info: 'Info',
 }
 
-const workbenchTabs = ['model', 'diagram', 'trace', 'version', 'docgen'] as const
+const workbenchTabs = ['model', 'diagram', 'trace', 'version', 'docgen', 'mdk', 'assistant'] as const
 
 type WorkbenchTab = (typeof workbenchTabs)[number]
 
@@ -271,6 +316,7 @@ export function SysmlWorkbench() {
   const [branch, setBranch] = useState('main')
   const [metamodel, setMetamodel] = useState<Metamodel | null>(null)
   const [elements, setElements] = useState<SysmlElement[]>([])
+  const [allElements, setAllElements] = useState<SysmlElement[]>([])
   const [selectedId, setSelectedId] = useState('')
   const [typeFilter, setTypeFilter] = useState('all')
   const [query, setQuery] = useState('')
@@ -282,6 +328,9 @@ export function SysmlWorkbench() {
   const [validation, setValidation] = useState<ValidationPayload | null>(null)
   const [diagramType, setDiagramType] = useState('requirements')
   const [diagram, setDiagram] = useState<DiagramPayload | null>(null)
+  const [views, setViews] = useState<SysmlElement[]>([])
+  const [selectedViewId, setSelectedViewId] = useState('all')
+  const [viewScope, setViewScope] = useState<ViewPayload | null>(null)
   const [diagramPositions, setDiagramPositions] = useState<
     Record<string, { x: number; y: number }>
   >({})
@@ -298,10 +347,24 @@ export function SysmlWorkbench() {
   const [mergeSource, setMergeSource] = useState('')
   const [forceMerge, setForceMerge] = useState(false)
   const [template, setTemplate] = useState(defaultTemplate)
+  const [docViewId, setDocViewId] = useState('all')
   const [documents, setDocuments] = useState<DocumentRecord[]>([])
   const [currentDocument, setCurrentDocument] = useState<DocumentRecord | null>(
     null
   )
+  const [aiModelReview, setAiModelReview] = useState<AiModelReview | null>(null)
+  const [mdkAdapters, setMdkAdapters] = useState<MdkAdapter[]>([])
+  const [mdkTool, setMdkTool] = useState('json')
+  const [mdkFilename, setMdkFilename] = useState('model.json')
+  const [mdkContent, setMdkContent] = useState(sampleMdkJson)
+  const [mdkParseResult, setMdkParseResult] = useState<MdkParseResponse | null>(
+    null
+  )
+  const [mdkImportJob, setMdkImportJob] = useState<MdkImportJob | null>(null)
+  const [mdkCommit, setMdkCommit] = useState(true)
+  const [mdkMessage, setMdkMessage] = useState('MDK frontend import')
+  const [assistantQuestion, setAssistantQuestion] = useState('')
+  const [assistantMessages, setAssistantMessages] = useState<AiChatMessage[]>([])
   const [activeTab, setActiveTab] = useState<WorkbenchTab>(() =>
     tabFromHash(window.location.hash)
   )
@@ -311,7 +374,10 @@ export function SysmlWorkbench() {
   const project = projects.find((item) => item.id === projectId)
   const types = Object.keys(metamodel?.types || {})
   const relationTypes = Object.keys(metamodel?.relation_labels || {})
-  const selectedElement = elements.find((item) => item.id === selectedId)
+  const selectedElement =
+    elements.find((item) => item.id === selectedId) ||
+    allElements.find((item) => item.id === selectedId)
+  const viewElements = allElements.filter((item) => item.type === 'View')
   const elementCounts = useMemo(() => countBy(elements, (item) => item.type), [
     elements,
   ])
@@ -343,6 +409,16 @@ export function SysmlWorkbench() {
   }, [projectId, branch, typeFilter, query])
 
   useEffect(() => {
+    if (!projectId || !branch) return
+    loadAllElements()
+  }, [projectId, branch])
+
+  useEffect(() => {
+    if (!projectId || !branch) return
+    loadViews()
+  }, [projectId, branch, allElements.length])
+
+  useEffect(() => {
     if (!selectedElement) return
     setForm(selectedElement)
     setAttributesText(JSON.stringify(selectedElement.attributes || {}, null, 2))
@@ -352,7 +428,7 @@ export function SysmlWorkbench() {
   useEffect(() => {
     if (!projectId || !branch) return
     loadDiagram()
-  }, [diagramType, projectId, branch])
+  }, [diagramType, projectId, branch, selectedViewId])
 
   async function bootstrap() {
     setLoading(true)
@@ -413,6 +489,19 @@ export function SysmlWorkbench() {
     }
   }
 
+  async function loadAllElements() {
+    if (!projectId || !branch) return
+    try {
+      const payload = await api<{ elements: SysmlElement[] }>(
+        `/api/projects/${encodeURIComponent(projectId)}/branches/${encodeURIComponent(branch)}/elements`,
+        { identity, role }
+      )
+      setAllElements(payload.elements)
+    } catch (error) {
+      notifyError(error)
+    }
+  }
+
   async function loadValidation() {
     if (!projectId || !branch) return
     try {
@@ -426,14 +515,56 @@ export function SysmlWorkbench() {
     }
   }
 
+  async function loadViews() {
+    if (!projectId || !branch) return
+    try {
+      const payload = await api<{ views: SysmlElement[] }>(
+        `/api/projects/${encodeURIComponent(projectId)}/branches/${encodeURIComponent(branch)}/views`,
+        { identity, role }
+      )
+      setViews(payload.views)
+      if (
+        selectedViewId !== 'all' &&
+        !payload.views.some((view) => view.id === selectedViewId)
+      ) {
+        setSelectedViewId('all')
+        setViewScope(null)
+      }
+      if (
+        docViewId !== 'all' &&
+        !payload.views.some((view) => view.id === docViewId)
+      ) {
+        setDocViewId('all')
+      }
+    } catch (error) {
+      notifyError(error)
+    }
+  }
+
   async function loadDiagram() {
     if (!projectId || !branch) return
     try {
+      if (selectedViewId !== 'all') {
+        const [diagramPayload, scopePayload] = await Promise.all([
+          api<{ diagram: DiagramPayload }>(
+            `/api/projects/${encodeURIComponent(projectId)}/branches/${encodeURIComponent(branch)}/views/${encodeURIComponent(selectedViewId)}/diagram`,
+            { identity, role }
+          ),
+          api<ViewPayload>(
+            `/api/projects/${encodeURIComponent(projectId)}/branches/${encodeURIComponent(branch)}/views/${encodeURIComponent(selectedViewId)}`,
+            { identity, role }
+          ),
+        ])
+        setDiagram(diagramPayload.diagram)
+        setViewScope(scopePayload)
+        return
+      }
       const payload = await api<{ diagram: DiagramPayload }>(
         `/api/projects/${encodeURIComponent(projectId)}/branches/${encodeURIComponent(branch)}/diagram?type=${diagramType}`,
         { identity, role }
       )
       setDiagram(payload.diagram)
+      setViewScope(null)
     } catch (error) {
       notifyError(error)
     }
@@ -515,6 +646,25 @@ export function SysmlWorkbench() {
     if (tab === 'trace') void loadTraceability()
     if (tab === 'version') void loadVersionData()
     if (tab === 'docgen') void loadDocuments()
+    if (tab === 'mdk') void loadMdkAdapters()
+  }
+
+  async function loadMdkAdapters() {
+    setBusy((current) => current || 'mdk-adapters')
+    try {
+      const payload = await api<{ adapters: MdkAdapter[] }>('/api/mdk/adapters', {
+        identity,
+        role,
+      })
+      setMdkAdapters(payload.adapters)
+      if (!payload.adapters.some((adapter) => adapter.id === mdkTool)) {
+        setMdkTool(payload.adapters[0]?.id || 'json')
+      }
+    } catch (error) {
+      notifyError(error)
+    } finally {
+      setBusy((current) => (current === 'mdk-adapters' ? '' : current))
+    }
   }
 
   async function handleLogin() {
@@ -605,7 +755,7 @@ export function SysmlWorkbench() {
       role,
     })
     setSelectedId(nextSelectedId ?? result.element.id)
-    await loadElements()
+    await Promise.all([loadElements(), loadAllElements()])
     if (successMessage) toast.success(successMessage)
   }
 
@@ -664,7 +814,7 @@ export function SysmlWorkbench() {
         { method: 'DELETE', identity, role }
       )
       setSelectedId('')
-      await loadElements()
+      await Promise.all([loadElements(), loadAllElements()])
       toast.success('模型元素已删除')
     } catch (error) {
       notifyError(error)
@@ -679,6 +829,22 @@ export function SysmlWorkbench() {
     const next = [...(parseJsonSafe<Relation[]>(relationsText, []) || [])]
     next.push({ type: relationTypes[0], target })
     setRelationsText(JSON.stringify(next, null, 2))
+  }
+
+  function toggleViewElement(elementId: string, checked: boolean) {
+    const attributes = parseJsonSafe<Record<string, unknown>>(attributesText, {})
+    const current = Array.isArray(attributes.included_elements)
+      ? attributes.included_elements.map(String)
+      : []
+    const next = checked
+      ? Array.from(new Set([...current, elementId]))
+      : current.filter((item) => item !== elementId)
+    const updated = { ...attributes, included_elements: next }
+    setAttributesText(JSON.stringify(updated, null, 2))
+    setForm((currentForm) => ({
+      ...currentForm,
+      attributes: updated,
+    }))
   }
 
   async function commitBranch() {
@@ -759,7 +925,7 @@ export function SysmlWorkbench() {
       setBranch(newBranch.trim())
       setNewBranch('')
       await loadProjectBranches()
-      await loadElements()
+      await Promise.all([loadElements(), loadAllElements()])
       toast.success('分支已创建')
     } catch (error) {
       notifyError(error)
@@ -812,7 +978,7 @@ export function SysmlWorkbench() {
         }
       )
       await loadProjectBranches()
-      await loadElements()
+      await Promise.all([loadElements(), loadAllElements()])
       await loadVersionData()
       toast.success('回滚已完成')
     } catch (error) {
@@ -844,7 +1010,7 @@ export function SysmlWorkbench() {
         return
       }
       await loadProjectBranches()
-      await loadElements()
+      await Promise.all([loadElements(), loadAllElements()])
       await loadVersionData()
       toast.success('分支合并完成')
     } catch (error) {
@@ -858,11 +1024,15 @@ export function SysmlWorkbench() {
     if (!projectId || !branch) return
     setBusy('generate-document')
     try {
+      const effectiveTemplate =
+        docViewId === 'all'
+          ? template
+          : `# View Document\n\n{{view:${docViewId}}}\n`
       const result = await api<{ document: DocumentRecord }>(
         `/api/projects/${encodeURIComponent(projectId)}/branches/${encodeURIComponent(branch)}/documents`,
         {
           method: 'POST',
-          body: JSON.stringify({ template, format: 'html' }),
+          body: JSON.stringify({ template: effectiveTemplate, format: 'html' }),
           identity,
           role,
         }
@@ -870,6 +1040,50 @@ export function SysmlWorkbench() {
       setCurrentDocument(result.document)
       await loadDocuments()
       toast.success('文档已生成')
+    } catch (error) {
+      notifyError(error)
+    } finally {
+      setBusy('')
+    }
+  }
+
+  async function generateAiDocgenDraft(mode: AiDocgenMode) {
+    if (!projectId || !branch) return
+    setBusy(`ai-docgen-${mode}`)
+    try {
+      const result = await api<AiDocgenDraft>(
+        `/api/projects/${encodeURIComponent(projectId)}/branches/${encodeURIComponent(branch)}/docgen/ai-draft`,
+        {
+          method: 'POST',
+          body: JSON.stringify({ mode, template }),
+          identity,
+          role,
+        }
+      )
+      setTemplate(result.template)
+      toast.success('AI DocGen draft generated')
+    } catch (error) {
+      notifyError(error)
+    } finally {
+      setBusy('')
+    }
+  }
+
+  async function runAiModelReview() {
+    if (!projectId || !branch) return
+    setBusy('ai-model-review')
+    try {
+      const result = await api<AiModelReview>(
+        `/api/projects/${encodeURIComponent(projectId)}/branches/${encodeURIComponent(branch)}/ve/ai-review`,
+        {
+          method: 'POST',
+          body: JSON.stringify({ selected_id: selectedId }),
+          identity,
+          role,
+        }
+      )
+      setAiModelReview(result)
+      toast.success('AI model review completed')
     } catch (error) {
       notifyError(error)
     } finally {
@@ -886,6 +1100,142 @@ export function SysmlWorkbench() {
         { identity, role }
       )
       setCurrentDocument(payload.document)
+    } catch (error) {
+      notifyError(error)
+    } finally {
+      setBusy('')
+    }
+  }
+
+  async function askAssistant() {
+    if (!projectId || !branch) return
+    const question = assistantQuestion.trim()
+    if (!question) {
+      toast.error('请输入问题')
+      return
+    }
+    const nextMessages: AiChatMessage[] = [
+      ...assistantMessages,
+      { role: 'user', content: question },
+    ]
+    setAssistantMessages(nextMessages)
+    setAssistantQuestion('')
+    setBusy('ai-chat')
+    try {
+      const result = await api<AiChatResponse>(
+        `/api/projects/${encodeURIComponent(projectId)}/branches/${encodeURIComponent(branch)}/ai/chat`,
+        {
+          method: 'POST',
+          body: JSON.stringify({ question, history: assistantMessages }),
+          identity,
+          role,
+        }
+      )
+      setAssistantMessages([
+        ...nextMessages,
+        { role: 'assistant', content: result.answer },
+      ])
+    } catch (error) {
+      setAssistantMessages(assistantMessages)
+      notifyError(error)
+    } finally {
+      setBusy('')
+    }
+  }
+
+  async function parseMdkContent(
+    nextContent = mdkContent,
+    nextFilename = mdkFilename,
+    nextTool = mdkTool
+  ) {
+    if (!nextContent.trim()) {
+      toast.error('请先上传或粘贴外部工具模型内容')
+      return
+    }
+    setBusy('mdk-parse')
+    try {
+      const content =
+        nextTool === 'json' ? parseJson<Record<string, unknown>>(nextContent, '模型 JSON', {}) : nextContent
+      const payload = await api<MdkParseResponse>('/api/mdk/parse', {
+        method: 'POST',
+        body: JSON.stringify({
+          filename: nextFilename.trim(),
+          tool: nextTool,
+          content,
+        }),
+        identity,
+        role,
+      })
+      setMdkParseResult(payload)
+      setMdkImportJob(null)
+      toast.success(`解析完成：${payload.parsed_model.element_count} 个元素`)
+    } catch (error) {
+      notifyError(error)
+    } finally {
+      setBusy('')
+    }
+  }
+
+  async function createMdkImportJob() {
+    if (!projectId || !branch) return
+    if (!mdkContent.trim()) {
+      toast.error('请先上传或粘贴外部工具模型内容')
+      return
+    }
+    setBusy('mdk-job')
+    try {
+      const content =
+        mdkTool === 'json' ? parseJson<Record<string, unknown>>(mdkContent, '模型 JSON', {}) : mdkContent
+      const payload = await api<{ job: MdkImportJob }>('/api/mdk/import-jobs', {
+        method: 'POST',
+        body: JSON.stringify({
+          project: projectId,
+          branch,
+          filename: mdkFilename.trim(),
+          tool: mdkTool,
+          content,
+        }),
+        identity,
+        role,
+      })
+      setMdkImportJob(payload.job)
+      setMdkParseResult({
+        parsed_model: payload.job.parsed_model,
+        mapping_report: payload.job.mapping_report,
+      })
+      toast.success(`导入任务已创建：${payload.job.id}`)
+    } catch (error) {
+      notifyError(error)
+    } finally {
+      setBusy('')
+    }
+  }
+
+  async function applyMdkImportJob() {
+    if (!projectId || !branch || !mdkImportJob) return
+    setBusy('mdk-apply')
+    try {
+      const payload = await api<{
+        job: MdkImportJob
+        result: { imported: number; mapping_report?: MappingReport }
+      }>(
+        `/api/mdk/import-jobs/${encodeURIComponent(mdkImportJob.id)}/apply`,
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            project: projectId,
+            branch,
+            commit: mdkCommit,
+            message: mdkMessage,
+          }),
+          identity,
+          role,
+        }
+      )
+      setMdkImportJob(payload.job)
+      await Promise.all([loadElements(), loadAllElements()])
+      if (mdkCommit) await loadProjectBranches()
+      toast.success(`已应用导入任务，导入 ${payload.result.imported} 个元素`)
     } catch (error) {
       notifyError(error)
     } finally {
@@ -983,7 +1333,7 @@ export function SysmlWorkbench() {
         <ConfigDrawer />
       </Header>
 
-      <Main fluid className='space-y-5 pb-8'>
+      <Main fluid className='sysml-workbench min-h-[calc(100svh-4rem)] pb-8'>
         {loading ? (
           <div className='flex min-h-[520px] items-center justify-center'>
             <div className='flex items-center gap-3 text-sm text-muted-foreground'>
@@ -992,26 +1342,33 @@ export function SysmlWorkbench() {
             </div>
           </div>
         ) : (
-          <>
-            <section className='space-y-4'>
-              <div className='rounded-lg border bg-card p-4 shadow-sm'>
-                <div className='flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between'>
+          <div className='sysml-shell space-y-5'>
+            <section className='space-y-4 pt-2'>
+              <div className='sysml-hero rounded-lg p-4 md:p-5'>
+                <div className='flex flex-col gap-5 xl:flex-row xl:items-center xl:justify-between'>
                   <div className='min-w-0'>
+                    <div className='sysml-eyebrow mb-2 text-xs font-semibold uppercase'>
+                      MBSE Model Management System
+                    </div>
                     <div className='flex flex-wrap items-center gap-2'>
-                      <h1 className='truncate text-2xl font-bold tracking-tight'>
+                      <h1 className='truncate text-2xl font-semibold tracking-tight md:text-3xl'>
                         {project?.name || 'SysML Project'}
                       </h1>
-                      <Badge variant='outline'>{branch}</Badge>
-                      <Badge variant='secondary'>
+                      <Badge variant='outline' className='rounded-sm'>
+                        branch / {branch}
+                      </Badge>
+                      <Badge variant='secondary' className='rounded-sm'>
                         {branches.find((item) => item.name === branch)?.head ||
                           'working'}
                       </Badge>
                     </div>
-                    <p className='mt-1 text-sm text-muted-foreground'>
+                    <p className='mt-2 max-w-3xl text-sm text-muted-foreground'>
                       {project?.organization || 'Current project'}
+                      <span className='mx-2 text-border'>/</span>
+                      MMS, VE, MDK and DocGen are kept in one traceable workspace.
                     </p>
                   </div>
-                  <div className='grid gap-2 md:grid-cols-[minmax(220px,1fr)_160px_auto] xl:min-w-[720px]'>
+                  <div className='grid gap-2 md:grid-cols-[minmax(220px,1fr)_160px_auto] xl:min-w-[740px]'>
                     <Select value={projectId} onValueChange={setProjectId}>
                       <SelectTrigger className='w-full'>
                         <SelectValue placeholder='Select project' />
@@ -1036,7 +1393,7 @@ export function SysmlWorkbench() {
                         ))}
                       </SelectContent>
                     </Select>
-                    <div className='flex gap-2'>
+                    <div className='flex flex-wrap gap-2 md:flex-nowrap'>
                       <Button
                         variant='outline'
                         onClick={() => exportModel('json')}
@@ -1064,7 +1421,7 @@ export function SysmlWorkbench() {
 
               <div className='grid gap-3 sm:grid-cols-2 xl:grid-cols-4'>
                 {stats.map((item) => (
-                  <Card key={item.label} className='shadow-sm'>
+                  <Card key={item.label} className='sysml-card sysml-metric'>
                     <CardHeader className='flex flex-row items-center justify-between space-y-0 pb-2'>
                       <CardTitle className='text-sm font-medium'>
                         {item.label}
@@ -1087,8 +1444,8 @@ export function SysmlWorkbench() {
               onValueChange={(value) => selectTab(value as WorkbenchTab)}
               className='space-y-4'
             >
-              <div className='sticky top-16 z-20 overflow-x-auto border-b bg-background/95 py-2 backdrop-blur supports-[backdrop-filter]:bg-background/75'>
-                <TabsList className='h-10'>
+              <div className='sticky top-16 z-20 overflow-x-auto rounded-lg py-2 backdrop-blur'>
+                <TabsList className='sysml-tabs h-11 p-1'>
                   <TabsTrigger value='model'>
                     <LayoutDashboard className='size-4' />
                     Model
@@ -1109,12 +1466,21 @@ export function SysmlWorkbench() {
                     <FileText className='size-4' />
                     Docs
                   </TabsTrigger>
+                  <TabsTrigger value='mdk'>
+                    <Wrench className='size-4' />
+                    MDK
+                  </TabsTrigger>
+                  <TabsTrigger value='assistant'>
+                    <MessageCircle className='size-4' />
+                    Assistant
+                  </TabsTrigger>
                 </TabsList>
               </div>
 
               <TabsContent value='model'>
                 <ModelTab
                   elements={elements}
+                  bindableElements={allElements}
                   selectedId={selectedId}
                   setSelectedId={setSelectedId}
                   typeFilter={typeFilter}
@@ -1129,11 +1495,16 @@ export function SysmlWorkbench() {
                   setAttributesText={setAttributesText}
                   relationsText={relationsText}
                   setRelationsText={setRelationsText}
+                  views={views.length ? views : viewElements}
                   validation={validation}
+                  aiReview={aiModelReview}
                   onNew={() => startNewElement(types[0] || 'Requirement')}
+                  onNewView={() => startNewElement('View')}
                   onDelete={deleteElement}
                   onSave={saveElement}
                   onAddRelation={addRelation}
+                  onToggleViewElement={toggleViewElement}
+                  onAiReview={runAiModelReview}
                   busy={busy}
                 />
               </TabsContent>
@@ -1143,8 +1514,12 @@ export function SysmlWorkbench() {
                   diagram={diagram}
                   diagramType={diagramType}
                   setDiagramType={setDiagramType}
+                  views={views.length ? views : viewElements}
+                  selectedViewId={selectedViewId}
+                  setSelectedViewId={setSelectedViewId}
+                  viewScope={viewScope}
                   metamodel={metamodel}
-                  elements={elements}
+                  elements={allElements.length ? allElements : elements}
                   selectedId={selectedId}
                   setSelectedId={setSelectedId}
                   onRefresh={loadDiagram}
@@ -1199,18 +1574,54 @@ export function SysmlWorkbench() {
                   template={template}
                   setTemplate={setTemplate}
                   elements={elements}
+                  views={views.length ? views : viewElements}
+                  docViewId={docViewId}
+                  setDocViewId={setDocViewId}
                   validation={validation}
                   documents={documents}
                   currentDocument={currentDocument}
                   onReset={() => setTemplate(defaultTemplate)}
                   onGenerate={generateDocument}
+                  onAiDraft={generateAiDocgenDraft}
                   onOpen={openDocument}
                   onDownload={downloadCurrent}
                   busy={busy}
                 />
               </TabsContent>
+
+              <TabsContent value='mdk'>
+                <MdkTab
+                  adapters={mdkAdapters}
+                  tool={mdkTool}
+                  setTool={setMdkTool}
+                  filename={mdkFilename}
+                  setFilename={setMdkFilename}
+                  content={mdkContent}
+                  setContent={setMdkContent}
+                  parseResult={mdkParseResult}
+                  importJob={mdkImportJob}
+                  commit={mdkCommit}
+                  setCommit={setMdkCommit}
+                  message={mdkMessage}
+                  setMessage={setMdkMessage}
+                  onRefreshAdapters={loadMdkAdapters}
+                  onParse={parseMdkContent}
+                  onCreateJob={createMdkImportJob}
+                  onApplyJob={applyMdkImportJob}
+                  busy={busy}
+                />
+              </TabsContent>
+              <TabsContent value='assistant'>
+                <AssistantTab
+                  messages={assistantMessages}
+                  question={assistantQuestion}
+                  setQuestion={setAssistantQuestion}
+                  onAsk={askAssistant}
+                  busy={busy}
+                />
+              </TabsContent>
             </Tabs>
-          </>
+          </div>
         )}
       </Main>
     </>
@@ -1219,6 +1630,7 @@ export function SysmlWorkbench() {
 
 type ModelTabProps = {
   elements: SysmlElement[]
+  bindableElements: SysmlElement[]
   selectedId: string
   setSelectedId: (id: string) => void
   typeFilter: string
@@ -1236,11 +1648,16 @@ type ModelTabProps = {
   setAttributesText: (value: string) => void
   relationsText: string
   setRelationsText: (value: string) => void
+  views: SysmlElement[]
   validation: ValidationPayload | null
+  aiReview: AiModelReview | null
   onNew: () => void
+  onNewView: () => void
   onDelete: () => void
   onSave: (event: FormEvent) => void
   onAddRelation: () => void
+  onToggleViewElement: (elementId: string, checked: boolean) => void
+  onAiReview: () => void
   busy: string
 }
 
@@ -1361,9 +1778,11 @@ function IdentityDialog({
 }
 
 function ModelTab(props: ModelTabProps) {
+  const typeCounts = countBy(props.elements, (item) => item.type)
+
   return (
-    <div className='grid gap-4 xl:grid-cols-[minmax(320px,0.42fr)_minmax(520px,0.58fr)]'>
-      <Card>
+    <div className='grid gap-4 xl:grid-cols-[420px_minmax(0,1fr)]'>
+      <Card className='sysml-card self-start'>
         <CardHeader className='space-y-3'>
           <div className='flex items-center justify-between gap-3'>
             <div>
@@ -1399,9 +1818,23 @@ function ModelTab(props: ModelTabProps) {
               />
             </div>
           </div>
+          <div className='grid grid-cols-3 gap-2 text-xs'>
+            <div className='rounded-md border bg-muted/30 px-3 py-2'>
+              <div className='font-semibold'>{props.elements.length}</div>
+              <div className='text-muted-foreground'>Elements</div>
+            </div>
+            <div className='rounded-md border bg-muted/30 px-3 py-2'>
+              <div className='font-semibold'>{Object.keys(typeCounts).length}</div>
+              <div className='text-muted-foreground'>Types</div>
+            </div>
+            <div className='rounded-md border bg-muted/30 px-3 py-2'>
+              <div className='font-semibold'>{props.validation?.summary.warnings || 0}</div>
+              <div className='text-muted-foreground'>Warnings</div>
+            </div>
+          </div>
         </CardHeader>
         <CardContent className='p-0'>
-          <ScrollArea className='h-[560px]'>
+          <ScrollArea className='h-[520px]'>
             {props.elements.length ? (
               <div className='divide-y'>
                 {props.elements.map((element) => (
@@ -1437,6 +1870,65 @@ function ModelTab(props: ModelTabProps) {
       </Card>
 
       <div className='space-y-4'>
+        <Card className='sysml-card'>
+          <CardHeader>
+            <div className='flex items-center justify-between gap-3'>
+              <div>
+                <CardTitle>Views</CardTitle>
+                <CardDescription>
+                  First-class model views for scoped Graph and Docs output.
+                </CardDescription>
+              </div>
+              <Button size='sm' variant='outline' onClick={props.onNewView}>
+                <Plus className='size-4' />
+                New View
+              </Button>
+            </div>
+          </CardHeader>
+          <CardContent>
+            {props.views.length ? (
+              <div className='grid gap-2 md:grid-cols-2'>
+                {props.views.map((view) => {
+                  const attributes = view.attributes || {}
+                  const included = Array.isArray(attributes.included_elements)
+                    ? attributes.included_elements.length
+                    : 0
+                  return (
+                    <button
+                      key={view.id}
+                      type='button'
+                      onClick={() => props.setSelectedId(view.id)}
+                      className={cn(
+                        'rounded-md border p-3 text-left transition-colors hover:bg-muted/60',
+                        props.selectedId === view.id && 'border-primary bg-muted'
+                      )}
+                    >
+                      <div className='flex items-center justify-between gap-2'>
+                        <span className='font-mono text-sm font-semibold'>
+                          {view.id}
+                        </span>
+                        <Badge variant='secondary'>{included} linked</Badge>
+                      </div>
+                      <div className='mt-1 text-sm font-medium'>
+                        {view.name || view.id}
+                      </div>
+                      <p className='mt-1 line-clamp-2 text-xs text-muted-foreground'>
+                        {String(attributes.viewpoint || 'General viewpoint')} /{' '}
+                        {view.description || 'No description'}
+                      </p>
+                    </button>
+                  )
+                })}
+              </div>
+            ) : (
+              <EmptyState
+                title='No Views yet'
+                description='Create a View to bind elements and drive scoped Graph/Docs output.'
+              />
+            )}
+          </CardContent>
+        </Card>
+
         <Card>
           <CardHeader>
             <div className='flex items-start justify-between gap-3'>
@@ -1519,6 +2011,14 @@ function ModelTab(props: ModelTabProps) {
                   }
                 />
               </Field>
+              {props.form.type === 'View' && (
+                <ViewBindingPanel
+                  elements={props.bindableElements}
+                  viewId={props.form.id}
+                  attributesText={props.attributesText}
+                  onToggle={props.onToggleViewElement}
+                />
+              )}
               <div className='grid gap-4 lg:grid-cols-2'>
                 <Field label='属性 JSON'>
                   <Textarea
@@ -1557,6 +2057,11 @@ function ModelTab(props: ModelTabProps) {
         </Card>
 
         <ValidationPanel validation={props.validation} />
+        <AiModelReviewPanel
+          review={props.aiReview}
+          busy={props.busy}
+          onReview={props.onAiReview}
+        />
       </div>
     </div>
   )
@@ -1565,7 +2070,7 @@ function ModelTab(props: ModelTabProps) {
 function ValidationPanel({ validation }: { validation: ValidationPayload | null }) {
   if (!validation) return null
   return (
-    <Card>
+    <Card className='sysml-card'>
       <CardHeader>
         <div className='flex items-center justify-between gap-3'>
           <div>
@@ -1609,10 +2114,153 @@ function ValidationPanel({ validation }: { validation: ValidationPayload | null 
   )
 }
 
+function ViewBindingPanel({
+  elements,
+  viewId,
+  attributesText,
+  onToggle,
+}: {
+  elements: SysmlElement[]
+  viewId: string
+  attributesText: string
+  onToggle: (elementId: string, checked: boolean) => void
+}) {
+  const included = includedElementIds(attributesText)
+  const candidates = elements.filter((element) => element.id !== viewId)
+  const grouped = candidates.reduce<Record<string, SysmlElement[]>>((acc, element) => {
+    acc[element.type] = acc[element.type] || []
+    acc[element.type].push(element)
+    return acc
+  }, {})
+  const orderedTypes = Object.keys(grouped).sort()
+
+  return (
+    <Card className='border-dashed bg-muted/20'>
+      <CardHeader className='pb-3'>
+        <div className='flex items-center justify-between gap-3'>
+          <div>
+            <CardTitle className='text-base'>Bind Elements To View</CardTitle>
+            <CardDescription>
+              Check elements to write them into attributes.included_elements.
+            </CardDescription>
+          </div>
+          <Badge variant='secondary'>{included.size} selected</Badge>
+        </div>
+      </CardHeader>
+      <CardContent>
+        {candidates.length ? (
+          <ScrollArea className='h-[300px] rounded-md border bg-background'>
+            <div className='space-y-4 p-3'>
+              {orderedTypes.map((type) => (
+                <div key={type} className='space-y-2'>
+                  <div className='flex items-center gap-2 text-xs font-semibold uppercase text-muted-foreground'>
+                    <span>{labelType(type)}</span>
+                    <Badge variant='outline'>{grouped[type].length}</Badge>
+                  </div>
+                  <div className='space-y-2'>
+                    {grouped[type]
+                      .sort((left, right) => left.id.localeCompare(right.id))
+                      .map((element) => {
+                        const checked = included.has(element.id)
+                        return (
+                          <label
+                            key={element.id}
+                            className='flex cursor-pointer items-start gap-3 rounded-md border p-3 hover:bg-muted/50'
+                          >
+                            <Checkbox
+                              checked={checked}
+                              onCheckedChange={(value) =>
+                                onToggle(element.id, value === true)
+                              }
+                            />
+                            <span className='min-w-0 flex-1'>
+                              <span className='block font-mono text-xs font-semibold'>
+                                {element.id}
+                              </span>
+                              <span className='block truncate text-sm'>
+                                {element.name || element.id}
+                              </span>
+                              <span className='line-clamp-1 text-xs text-muted-foreground'>
+                                {element.description || element.owner || 'No description'}
+                              </span>
+                            </span>
+                          </label>
+                        )
+                      })}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </ScrollArea>
+        ) : (
+          <EmptyState
+            title='No bindable elements'
+            description='Create requirements, blocks, tests, or interfaces before binding a View.'
+          />
+        )}
+      </CardContent>
+    </Card>
+  )
+}
+
+function AiModelReviewPanel({
+  review,
+  busy,
+  onReview,
+}: {
+  review: AiModelReview | null
+  busy: string
+  onReview: () => void
+}) {
+  const loading = busy === 'ai-model-review'
+
+  return (
+    <Card className='sysml-card'>
+      <CardHeader>
+        <div className='flex items-center justify-between gap-3'>
+          <div>
+            <CardTitle>{'AI \u6a21\u578b\u5ba1\u67e5'}</CardTitle>
+            <CardDescription>{'\u57fa\u4e8e\u5f53\u524d VE \u6a21\u578b\u7ed9\u51fa\u4e00\u81f4\u6027\u548c\u8ffd\u6eaf\u5efa\u8bae'}</CardDescription>
+          </div>
+          <Button variant='secondary' size='sm' onClick={onReview} disabled={loading}>
+            {loading ? (
+              <Loader2 className='size-4 animate-spin' />
+            ) : (
+              <Sparkles className='size-4' />
+            )}
+            {'AI \u5ba1\u67e5'}
+          </Button>
+        </div>
+      </CardHeader>
+      <CardContent>
+        {loading ? (
+          <div className='flex items-center gap-2 text-sm text-muted-foreground'>
+            <Loader2 className='size-4 animate-spin' />
+            {'AI \u5ba1\u67e5\u4e2d'}
+          </div>
+        ) : review ? (
+          <div className='rounded-md border bg-muted/20 p-4'>
+            <MarkdownMessage content={review.review} compact />
+          </div>
+        ) : (
+          <EmptyState
+            title={'\u5c1a\u672a\u8fd0\u884c AI \u5ba1\u67e5'}
+            description={'\u70b9\u51fb AI \u5ba1\u67e5\u540e\uff0c\u7cfb\u7edf\u4f1a\u5206\u6790\u5f53\u524d\u6a21\u578b\u7684\u5b8c\u6574\u6027\u3001\u8ffd\u6eaf\u6027\u548c\u6587\u6863\u53ef\u751f\u6210\u6027'}
+          />
+        )}
+      </CardContent>
+    </Card>
+  )
+}
+
 type DiagramTabProps = {
   diagram: DiagramPayload | null
   diagramType: string
   setDiagramType: (type: string) => void
+  views: SysmlElement[]
+  selectedViewId: string
+  setSelectedViewId: (viewId: string) => void
+  viewScope: ViewPayload | null
   metamodel: Metamodel | null
   elements: SysmlElement[]
   selectedId: string
@@ -1632,13 +2280,31 @@ type DiagramTabProps = {
 
 function DiagramTab(props: DiagramTabProps) {
   return (
-    <div className='grid gap-4 xl:grid-cols-[340px_1fr]'>
-      <Card>
+    <div className='grid gap-4 xl:grid-cols-[300px_minmax(0,1fr)]'>
+      <Card className='sysml-card self-start xl:sticky xl:top-32'>
         <CardHeader>
           <CardTitle>图谱设置</CardTitle>
           <CardDescription>按不同 SysML 视角查看关系网络</CardDescription>
         </CardHeader>
         <CardContent className='space-y-4'>
+          <Field label='View scope'>
+            <Select
+              value={props.selectedViewId}
+              onValueChange={props.setSelectedViewId}
+            >
+              <SelectTrigger className='w-full'>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value='all'>All model elements</SelectItem>
+                {props.views.map((view) => (
+                  <SelectItem key={view.id} value={view.id}>
+                    {view.name || view.id}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </Field>
           <Field label='图谱类型'>
             <Select value={props.diagramType} onValueChange={props.setDiagramType}>
               <SelectTrigger className='w-full'>
@@ -1653,6 +2319,17 @@ function DiagramTab(props: DiagramTabProps) {
               </SelectContent>
             </Select>
           </Field>
+          {props.viewScope && (
+            <div className='rounded-md border bg-muted/30 p-3 text-sm'>
+              <div className='font-medium'>{props.viewScope.view.name}</div>
+              <p className='mt-1 text-xs text-muted-foreground'>
+                {props.viewScope.element_count} elements in this View /{' '}
+                {Object.entries(props.viewScope.summary)
+                  .map(([type, count]) => `${type}: ${count}`)
+                  .join(', ') || 'No scoped elements'}
+              </p>
+            </div>
+          )}
           <Button variant='outline' onClick={props.onRefresh}>
             <RefreshCw className='size-4' />
             刷新图谱
@@ -1660,7 +2337,7 @@ function DiagramTab(props: DiagramTabProps) {
           <Separator />
           <div className='grid gap-2'>
             <p className='text-sm font-medium'>当前元素</p>
-            <ScrollArea className='h-[360px] rounded-md border'>
+            <ScrollArea className='h-[260px] rounded-md border'>
               <div className='divide-y'>
                 {props.elements.map((element) => (
                   <button
@@ -1682,12 +2359,14 @@ function DiagramTab(props: DiagramTabProps) {
         </CardContent>
       </Card>
 
-      <Card className='overflow-hidden'>
+      <Card className='sysml-card overflow-hidden'>
         <CardHeader>
           <div className='flex items-center justify-between gap-3'>
             <div>
               <CardTitle>
-                {displayDiagramNames[props.diagramType] || 'Model Graph'}
+                {props.viewScope
+                  ? `View Graph: ${props.viewScope.view.name || props.viewScope.view.id}`
+                  : displayDiagramNames[props.diagramType] || 'Model Graph'}
               </CardTitle>
               <CardDescription>
                 {props.diagram?.nodes.length || 0} 节点 / {props.diagram?.edges.length || 0} 关系
@@ -2016,14 +2695,14 @@ function DiagramCanvas({
 
   if (!diagram || !diagram.nodes.length) {
     return (
-      <div className='h-[650px] bg-muted/30'>
+      <div className='h-[560px] bg-muted/30'>
         <EmptyState title='暂无图谱' description='当前模型没有可绘制的节点' />
       </div>
     )
   }
 
   return (
-    <div className='h-[720px] bg-muted/30'>
+    <div className='h-[620px] bg-muted/30'>
       <ReactFlow<SysmlFlowNode, SysmlFlowEdge>
         nodes={nodes}
         edges={edges}
@@ -2039,8 +2718,8 @@ function DiagramCanvas({
           setEdgeRelationType(edge.data?.relationType || relationTypes[0] || '')
         }}
         fitView
-        fitViewOptions={{ padding: 0.2 }}
-        minZoom={0.2}
+        fitViewOptions={{ padding: 0.08, maxZoom: 1.05 }}
+        minZoom={0.35}
         maxZoom={2.5}
         panOnDrag
         zoomOnScroll
@@ -2065,6 +2744,7 @@ function DiagramCanvas({
         <MiniMap
           pannable
           zoomable
+          style={{ width: 160, height: 110 }}
           nodeBorderRadius={8}
           nodeColor={(node) =>
             node.selected ? 'var(--primary)' : 'var(--muted-foreground)'
@@ -2072,7 +2752,7 @@ function DiagramCanvas({
           maskColor='color-mix(in oklch, var(--background) 70%, transparent)'
         />
         <Controls position='bottom-left' />
-        <div className='nodrag nowheel absolute right-3 top-3 z-10 grid w-[280px] gap-3 rounded-md border bg-background/95 p-3 shadow-sm backdrop-blur'>
+        <div className='nodrag nowheel absolute right-3 top-3 z-10 grid w-[220px] gap-3 rounded-md border bg-background/95 p-3 shadow-sm backdrop-blur'>
           <Field label='新连线类型'>
             <Select value={edgeRelationType} onValueChange={setEdgeRelationType}>
               <SelectTrigger className='w-full'>
@@ -2247,14 +2927,14 @@ function layoutDiagramNodes(diagram: DiagramPayload, elements: SysmlElement[]) {
       return left.id.localeCompare(right.id)
     })
     const row = peers.findIndex((peer) => peer.id === node.id)
-    const columnWidth = 330
-    const rowHeight = 148
-    const offset = (column % 2) * 32
+    const columnWidth = 290
+    const rowHeight = 132
+    const offset = (column % 2) * 24
     return {
       ...node,
       position: {
-        x: 80 + column * columnWidth,
-        y: 70 + Math.max(row, 0) * rowHeight + offset,
+        x: 60 + column * columnWidth,
+        y: 48 + Math.max(row, 0) * rowHeight + offset,
       },
     }
   })
@@ -2353,7 +3033,7 @@ function TraceTab({
   onRefresh: () => void
 }) {
   return (
-    <Card>
+    <Card className='sysml-card'>
       <CardHeader>
         <div className='flex items-center justify-between gap-3'>
           <div>
@@ -2445,16 +3125,16 @@ function VersionTab(props: VersionTabProps) {
     { id: 'working', label: 'working' },
     ...props.tags.map((tag) => ({
       id: `tag:${tag.id}`,
-      label: `tag:${tag.name} / ${tag.commit}`,
+      label: `tag:${tag.name} / ${shortLabel(tag.commit, 14)}`,
     })),
     ...props.commits.map((commit) => ({
       id: commit.id,
-      label: `${commit.id} / ${commit.message}`,
+      label: `${shortLabel(commit.id, 13)} / ${shortLabel(commit.message, 28)}`,
     })),
   ]
   return (
-    <div className='grid gap-4 xl:grid-cols-[380px_1fr]'>
-      <Card>
+    <div className='space-y-4'>
+      <Card className='sysml-card'>
         <CardHeader>
           <div className='flex items-center justify-between'>
             <div>
@@ -2466,12 +3146,12 @@ function VersionTab(props: VersionTabProps) {
             </Button>
           </div>
         </CardHeader>
-        <CardContent className='space-y-5'>
+        <CardContent className='grid gap-4 lg:grid-cols-2 2xl:grid-cols-[1.25fr_1.25fr_1fr_1fr_1fr] [&>div]:min-w-0 [&>div]:rounded-md [&>div]:border [&>div]:bg-muted/20 [&>div]:p-3 [&>[data-orientation=horizontal]]:hidden'>
           <div className='grid gap-3'>
-            <div className='grid gap-3 sm:grid-cols-2 xl:grid-cols-1'>
+            <div className='grid gap-3 sm:grid-cols-2'>
               <Field label='Diff From'>
                 <Select value={props.diffFrom} onValueChange={props.setDiffFrom}>
-                  <SelectTrigger className='w-full'>
+                  <SelectTrigger className='w-full min-w-0 overflow-hidden [&>span]:truncate'>
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
@@ -2485,7 +3165,7 @@ function VersionTab(props: VersionTabProps) {
               </Field>
               <Field label='Diff To'>
                 <Select value={props.diffTo} onValueChange={props.setDiffTo}>
-                  <SelectTrigger className='w-full'>
+                  <SelectTrigger className='w-full min-w-0 overflow-hidden [&>span]:truncate'>
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
@@ -2510,7 +3190,7 @@ function VersionTab(props: VersionTabProps) {
                 value={props.rollbackCommit}
                 onValueChange={props.setRollbackCommit}
               >
-                <SelectTrigger className='w-full'>
+                <SelectTrigger className='w-full min-w-0 overflow-hidden [&>span]:truncate'>
                   <SelectValue placeholder='选择提交' />
                 </SelectTrigger>
                 <SelectContent>
@@ -2594,7 +3274,7 @@ function VersionTab(props: VersionTabProps) {
       </Card>
 
       <div className='space-y-4'>
-        <Card>
+        <Card className='sysml-card'>
           <CardHeader>
             <div className='flex items-center justify-between gap-3'>
               <div>
@@ -2641,8 +3321,8 @@ function VersionTab(props: VersionTabProps) {
           </CardContent>
         </Card>
 
-        <div className='grid gap-4 xl:grid-cols-3'>
-          <Card>
+      <div className='grid gap-4 xl:grid-cols-3'>
+          <Card className='sysml-card'>
             <CardHeader>
               <CardTitle>标签基线</CardTitle>
               <CardDescription>{props.tags.length} 个只读快照</CardDescription>
@@ -2677,7 +3357,7 @@ function VersionTab(props: VersionTabProps) {
               </ScrollArea>
             </CardContent>
           </Card>
-          <Card>
+          <Card className='sysml-card'>
             <CardHeader>
               <CardTitle>提交记录</CardTitle>
               <CardDescription>{props.commits.length} 条提交</CardDescription>
@@ -2701,7 +3381,7 @@ function VersionTab(props: VersionTabProps) {
               </ScrollArea>
             </CardContent>
           </Card>
-          <Card>
+          <Card className='sysml-card'>
             <CardHeader>
               <CardTitle>审计日志</CardTitle>
               <CardDescription>{props.auditEvents.length} 条事件</CardDescription>
@@ -2756,36 +3436,57 @@ type DocgenTabProps = {
   template: string
   setTemplate: (value: string) => void
   elements: SysmlElement[]
+  views: SysmlElement[]
+  docViewId: string
+  setDocViewId: (value: string) => void
   validation: ValidationPayload | null
   documents: DocumentRecord[]
   currentDocument: DocumentRecord | null
   onReset: () => void
   onGenerate: () => void
+  onAiDraft: (mode: AiDocgenMode) => void
   onOpen: (id: string) => void
   onDownload: (format: 'html' | 'markdown' | 'pdf') => void
   busy: string
 }
 
 function DocgenTab(props: DocgenTabProps) {
-  const viewOutline = useMemo(() => buildViewOutline(props.template), [
-    props.template,
-  ])
-
   return (
-    <div className='grid gap-4 xl:grid-cols-[minmax(360px,0.42fr)_minmax(560px,0.58fr)]'>
-      <Card>
+    <div className='sysml-doc-grid'>
+      <Card className='sysml-card'>
         <CardHeader>
           <div className='flex items-center justify-between gap-3'>
             <div>
-              <CardTitle>DocGen 模板</CardTitle>
-              <CardDescription>使用占位符生成 HTML / Markdown / PDF</CardDescription>
+              <CardTitle>DocGen {'\u6a21\u677f'}</CardTitle>
+              <CardDescription>{'\u4f7f\u7528\u5360\u4f4d\u7b26\u751f\u6210 HTML / Markdown / PDF'}</CardDescription>
             </div>
-            <Button variant='outline' size='sm' onClick={props.onReset}>
-              <RotateCcw className='size-4' />
-            </Button>
+            <div className='flex gap-2'>
+              <DocumentHistorySheet
+                documents={props.documents}
+                onOpen={props.onOpen}
+              />
+              <Button variant='outline' size='sm' onClick={props.onReset}>
+                <RotateCcw className='size-4' />
+              </Button>
+            </div>
           </div>
         </CardHeader>
         <CardContent className='space-y-4'>
+          <Field label='Document scope'>
+            <Select value={props.docViewId} onValueChange={props.setDocViewId}>
+              <SelectTrigger className='w-full'>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value='all'>Full model document</SelectItem>
+                {props.views.map((view) => (
+                  <SelectItem key={view.id} value={view.id}>
+                    {view.name || view.id}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </Field>
           <Suspense
             fallback={
               <div className='flex h-[420px] items-center justify-center rounded-md border bg-muted/30 text-sm text-muted-foreground'>
@@ -2803,6 +3504,18 @@ function DocgenTab(props: DocgenTabProps) {
           </Suspense>
           <div className='flex flex-wrap gap-2'>
             <Button
+              variant='secondary'
+              onClick={() => props.onAiDraft('full')}
+              disabled={props.busy === 'ai-docgen-full'}
+            >
+              {props.busy === 'ai-docgen-full' ? (
+                <Loader2 className='size-4 animate-spin' />
+              ) : (
+                <Sparkles className='size-4' />
+              )}
+              {'AI \u751f\u6210\u7ae0\u8282'}
+            </Button>
+            <Button
               onClick={props.onGenerate}
               disabled={props.busy === 'generate-document'}
             >
@@ -2811,7 +3524,7 @@ function DocgenTab(props: DocgenTabProps) {
               ) : (
                 <FileText className='size-4' />
               )}
-              生成
+              {'\u751f\u6210'}
             </Button>
             <Button variant='outline' onClick={() => props.onDownload('markdown')}>
               Markdown
@@ -2823,67 +3536,16 @@ function DocgenTab(props: DocgenTabProps) {
               PDF
             </Button>
           </div>
-          <Separator />
-          <div>
-            <h3 className='mb-2 text-sm font-semibold'>View Outline</h3>
-            <div className='mb-4 rounded-md border bg-muted/30 p-3'>
-              {viewOutline.length ? (
-                <div className='space-y-2'>
-                  {viewOutline.map((view) => (
-                    <div
-                      key={`${view.level}-${view.title}`}
-                      className={cn(
-                        'flex items-center gap-2 text-sm',
-                        view.level > 2 && 'pl-4 text-muted-foreground'
-                      )}
-                    >
-                      <FileText className='size-4 text-muted-foreground' />
-                      <span className='truncate'>{view.title}</span>
-                      <Badge variant='outline' className='ms-auto'>
-                        h{view.level}
-                      </Badge>
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                <p className='text-sm text-muted-foreground'>
-                  Add Markdown headings to define document views.
-                </p>
-              )}
-            </div>
-            <h3 className='mb-2 text-sm font-semibold'>历史文档</h3>
-            <ScrollArea className='h-[220px] rounded-md border'>
-              {props.documents.length ? (
-                <div className='divide-y'>
-                  {props.documents.map((document) => (
-                    <button
-                      key={document.id}
-                      type='button'
-                      onClick={() => props.onOpen(document.id)}
-                      className='grid w-full gap-1 px-3 py-2 text-left text-sm hover:bg-muted'
-                    >
-                      <span className='font-mono font-semibold'>{document.id}</span>
-                      <span className='text-xs text-muted-foreground'>
-                        {document.created_at} / {document.model_hash}
-                      </span>
-                    </button>
-                  ))}
-                </div>
-              ) : (
-                <EmptyState title='暂无文档' description='生成后会出现在这里' />
-              )}
-            </ScrollArea>
-          </div>
         </CardContent>
       </Card>
 
-      <Card className='overflow-hidden'>
+      <Card className='sysml-card overflow-hidden'>
         <CardHeader>
           <div className='flex items-center justify-between gap-3'>
             <div>
-              <CardTitle>文档预览</CardTitle>
+              <CardTitle>{'\u6587\u6863\u9884\u89c8'}</CardTitle>
               <CardDescription>
-                {props.currentDocument?.id || '尚未生成文档'}
+                {props.currentDocument?.id || '\u5c1a\u672a\u751f\u6210\u6587\u6863'}
               </CardDescription>
             </div>
             {props.currentDocument && <Badge variant='secondary'>HTML</Badge>}
@@ -2892,17 +3554,606 @@ function DocgenTab(props: DocgenTabProps) {
         <CardContent className='p-0'>
           {props.currentDocument?.html ? (
             <iframe
-              title='文档预览'
+              title='Document preview'
               srcDoc={props.currentDocument.html}
               className='h-[720px] w-full border-0 bg-background'
             />
           ) : (
             <div className='h-[720px]'>
-              <EmptyState title='等待生成' description='点击生成按钮预览文档' />
+              <EmptyState title={'\u7b49\u5f85\u751f\u6210'} description={'\u70b9\u51fb\u751f\u6210\u6309\u94ae\u9884\u89c8\u6587\u6863'} />
             </div>
           )}
         </CardContent>
       </Card>
+    </div>
+  )
+}
+
+function DocumentHistorySheet({
+  documents,
+  onOpen,
+}: {
+  documents: DocumentRecord[]
+  onOpen: (id: string) => void
+}) {
+  return (
+    <Sheet>
+      <SheetTrigger asChild>
+        <Button variant='outline' size='sm'>
+          <FileText className='size-4' />
+          {'\u5386\u53f2'}
+        </Button>
+      </SheetTrigger>
+      <SheetContent side='right' className='w-[420px] sm:max-w-[420px]'>
+        <SheetHeader>
+          <SheetTitle>Document history</SheetTitle>
+          <SheetDescription>{'\u6253\u5f00\u5df2\u751f\u6210\u7684\u6587\u6863\u7248\u672c'}</SheetDescription>
+        </SheetHeader>
+        <ScrollArea className='min-h-0 flex-1 px-4 pb-4'>
+          {documents.length ? (
+            <div className='space-y-2'>
+              {documents.map((document) => (
+                <button
+                  key={document.id}
+                  type='button'
+                  onClick={() => onOpen(document.id)}
+                  className='grid w-full gap-1 rounded-md border bg-background px-3 py-3 text-left text-sm transition-colors hover:bg-muted'
+                >
+                  <span className='truncate font-mono font-semibold'>{document.id}</span>
+                  <span className='truncate text-xs text-muted-foreground'>
+                    {document.created_at}
+                  </span>
+                  <span className='truncate font-mono text-[11px] text-muted-foreground'>
+                    {document.model_hash}
+                  </span>
+                </button>
+              ))}
+            </div>
+          ) : (
+            <EmptyState title={'\u6682\u65e0\u6587\u6863'} description={'\u751f\u6210\u540e\u4f1a\u51fa\u73b0\u5728\u8fd9\u91cc'} />
+          )}
+        </ScrollArea>
+      </SheetContent>
+    </Sheet>
+  )
+}
+
+type MdkTabProps = {
+  adapters: MdkAdapter[]
+  tool: string
+  setTool: (value: string) => void
+  filename: string
+  setFilename: (value: string) => void
+  content: string
+  setContent: (value: string) => void
+  parseResult: MdkParseResponse | null
+  importJob: MdkImportJob | null
+  commit: boolean
+  setCommit: (value: boolean) => void
+  message: string
+  setMessage: (value: string) => void
+  onRefreshAdapters: () => void
+  onParse: (content?: string, filename?: string, tool?: string) => void
+  onCreateJob: () => void
+  onApplyJob: () => void
+  busy: string
+}
+
+type AssistantTabProps = {
+  messages: AiChatMessage[]
+  question: string
+  setQuestion: (value: string) => void
+  onAsk: () => void
+  busy: string
+}
+
+function AssistantTab(props: AssistantTabProps) {
+  const examples = [
+    '\u5f53\u524d\u6a21\u578b\u6709\u54ea\u4e9b\u9700\u6c42\u8fd8\u6ca1\u6709\u9a8c\u8bc1\u95ed\u73af\uff1f',
+    '\u89e3\u91ca\u4e00\u4e0b\u8fd9\u4e2a\u7cfb\u7edf\u7684\u8ffd\u6eaf\u77e9\u9635\u3002',
+    '\u54ea\u4e9b\u6a21\u578b\u5143\u7d20\u9002\u5408\u5199\u8fdb\u7cfb\u7edf\u67b6\u6784\u7ae0\u8282\uff1f',
+    '\u8fd9\u4e2a\u6a21\u578b\u76ee\u524d\u6700\u5927\u7684\u8d28\u91cf\u98ce\u9669\u662f\u4ec0\u4e48\uff1f',
+  ]
+
+  return (
+    <div className='grid gap-4 xl:grid-cols-[320px_minmax(0,1fr)]'>
+      <Card className='sysml-card'>
+        <CardHeader>
+          <div className='flex items-center gap-2'>
+            <div className='flex size-9 items-center justify-center rounded-md bg-primary text-primary-foreground'>
+              <Sparkles className='size-4' />
+            </div>
+            <div>
+              <CardTitle>SysML Assistant</CardTitle>
+              <CardDescription>{'\u57fa\u4e8e MMS \u6a21\u578b\u7684\u95ee\u7b54\u52a9\u624b'}</CardDescription>
+            </div>
+          </div>
+        </CardHeader>
+        <CardContent className='space-y-4'>
+          <div className='space-y-2'>
+            <div className='text-xs font-medium uppercase text-muted-foreground'>
+              {'\u63a8\u8350\u95ee\u9898'}
+            </div>
+            {examples.map((example) => (
+              <button
+                key={example}
+                type='button'
+                className='w-full rounded-md border bg-background px-3 py-2 text-left text-sm leading-5 transition-colors hover:bg-muted'
+                onClick={() => props.setQuestion(example)}
+              >
+                {example}
+              </button>
+            ))}
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card className='sysml-card overflow-hidden'>
+        <CardHeader className='border-b bg-muted/20'>
+          <div className='flex items-center justify-between gap-3'>
+            <div className='flex items-center gap-3'>
+              <div className='flex size-10 items-center justify-center rounded-md border bg-background'>
+                <MessageCircle className='size-5 text-primary' />
+              </div>
+              <div>
+                <CardTitle>{'\u6a21\u578b\u95ee\u7b54\u7ebf\u7a0b'}</CardTitle>
+                <CardDescription>{'\u8be2\u95ee\u9700\u6c42\u3001\u6a21\u5757\u3001\u8ffd\u8e2a\u5173\u7cfb\u6216\u6587\u6863\u751f\u6210\u6d41\u7a0b'}</CardDescription>
+              </div>
+            </div>
+            <Badge variant='secondary'>Assistant</Badge>
+          </div>
+        </CardHeader>
+        <CardContent className='grid h-[680px] grid-rows-[1fr_auto] gap-0 p-0'>
+          <ScrollArea className='min-h-0 p-5'>
+            {props.messages.length || props.busy === 'ai-chat' ? (
+              <div className='space-y-5'>
+                {props.messages.map((message, index) => (
+                  <AssistantMessageBubble
+                    key={`${message.role}-${index}`}
+                    message={message}
+                  />
+                ))}
+                {props.busy === 'ai-chat' ? <AssistantLoadingBubble /> : null}
+              </div>
+            ) : (
+              <div className='flex h-[460px] items-center justify-center'>
+                <div className='max-w-md text-center'>
+                  <div className='mx-auto flex size-12 items-center justify-center rounded-md border bg-background'>
+                    <Sparkles className='size-5 text-primary' />
+                  </div>
+                  <h3 className='mt-4 text-base font-semibold'>{'\u5f00\u59cb\u8be2\u95ee\u6a21\u578b'}</h3>
+                  <p className='mt-2 text-sm text-muted-foreground'>
+                    {'\u4f8b\u5982\u8be2\u95ee\u54ea\u4e9b\u9700\u6c42\u672a\u95ed\u73af\u3001\u67d0\u4e2a\u5143\u7d20\u7684\u4f9d\u636e\u3001\u6216\u8005\u5982\u4f55\u89e3\u91ca\u8ffd\u8e2a\u77e9\u9635\u3002'}
+                  </p>
+                </div>
+              </div>
+            )}
+          </ScrollArea>
+          <div className='border-t bg-background p-4'>
+            <div className='rounded-lg border bg-muted/20 p-2'>
+              <Textarea
+                rows={3}
+                value={props.question}
+                onChange={(event) => props.setQuestion(event.target.value)}
+                placeholder={'\u4f8b\u5982\uff1a\u54ea\u4e9b\u9700\u6c42\u8fd8\u6ca1\u6709\u6d4b\u8bd5\u7528\u4f8b\uff1f'}
+                className='min-h-[86px] resize-none border-0 bg-transparent shadow-none focus-visible:ring-0'
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
+                    event.preventDefault()
+                    props.onAsk()
+                  }
+                }}
+              />
+              <div className='flex items-center justify-between gap-2 px-2 pb-1'>
+                <span className='text-xs text-muted-foreground'>{'Ctrl + Enter \u53d1\u9001'}</span>
+                <Button
+                  type='button'
+                  onClick={props.onAsk}
+                  disabled={props.busy === 'ai-chat'}
+                >
+                  {props.busy === 'ai-chat' ? (
+                    <Loader2 className='size-4 animate-spin' />
+                  ) : (
+                    <Send className='size-4' />
+                  )}
+                  {'\u53d1\u9001'}
+                </Button>
+              </div>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+    </div>
+  )
+}
+
+function AssistantMessageBubble({ message }: { message: AiChatMessage }) {
+  const isUser = message.role === 'user'
+  return (
+    <div className={cn('flex gap-3', isUser && 'justify-end')}>
+      {!isUser ? (
+        <div className='flex size-9 shrink-0 items-center justify-center rounded-md border bg-background'>
+          <Sparkles className='size-4 text-primary' />
+        </div>
+      ) : null}
+      <div
+        className={cn(
+          'max-w-[82%] rounded-lg border px-4 py-3 text-sm leading-6 shadow-sm',
+          isUser ? 'bg-primary text-primary-foreground' : 'bg-background'
+        )}
+      >
+        <div className='mb-2 flex items-center gap-2 text-xs font-medium opacity-80'>
+          <span>{isUser ? '\u4f60' : 'Assistant'}</span>
+          {!isUser ? <Badge variant='outline'>{'\u6a21\u578b\u4e0a\u4e0b\u6587'}</Badge> : null}
+        </div>
+        {isUser ? (
+          <div className='whitespace-pre-wrap'>{message.content}</div>
+        ) : (
+          <MarkdownMessage content={message.content} compact />
+        )}
+      </div>
+    </div>
+  )
+}
+
+function AssistantLoadingBubble() {
+  return (
+    <div className='flex gap-3'>
+      <div className='flex size-9 shrink-0 items-center justify-center rounded-md border bg-background'>
+        <Sparkles className='size-4 text-primary' />
+      </div>
+      <div className='max-w-[82%] rounded-lg border bg-background px-4 py-3 shadow-sm'>
+        <div className='mb-2 flex items-center gap-2 text-xs font-medium text-muted-foreground'>
+          <Loader2 className='size-3.5 animate-spin' />
+          Assistant {'\u6b63\u5728\u5206\u6790'}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function MdkTab(props: MdkTabProps) {
+  const selectedAdapter = props.adapters.find((adapter) => adapter.id === props.tool)
+  const report = props.parseResult?.mapping_report
+  const canApply = Boolean(props.importJob && props.importJob.status === 'parsed')
+
+  async function handleFileChange(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0]
+    if (!file) return
+    const text = await file.text()
+    const adapter = adapterFromFilename(file.name, props.adapters)
+    const nextTool = adapter?.id || props.tool
+    props.setFilename(file.name)
+    props.setContent(text)
+    if (adapter) props.setTool(adapter.id)
+    event.target.value = ''
+    props.onParse(text, file.name, nextTool)
+  }
+
+  return (
+    <div className='grid gap-4 xl:grid-cols-[minmax(360px,0.42fr)_minmax(560px,0.58fr)]'>
+      <div className='space-y-4'>
+        <Card className='sysml-card'>
+          <CardHeader>
+            <div className='flex items-center justify-between gap-3'>
+              <div>
+                <CardTitle>外部工具适配器</CardTitle>
+                <CardDescription>
+                  Cameo / Jupyter / MATLAB / JSON / XMI 的统一接入能力
+                </CardDescription>
+              </div>
+              <Button
+                variant='outline'
+                size='sm'
+                onClick={props.onRefreshAdapters}
+                disabled={props.busy === 'mdk-adapters'}
+              >
+                {props.busy === 'mdk-adapters' ? (
+                  <Loader2 className='size-4 animate-spin' />
+                ) : (
+                  <RefreshCw className='size-4' />
+                )}
+              </Button>
+            </div>
+          </CardHeader>
+          <CardContent>
+            {props.adapters.length ? (
+              <div className='grid gap-3'>
+                {props.adapters.map((adapter) => (
+                  <button
+                    key={adapter.id}
+                    type='button'
+                    onClick={() => props.setTool(adapter.id)}
+                    className={cn(
+                      'rounded-md border p-3 text-left transition-colors hover:bg-muted/50',
+                      props.tool === adapter.id && 'border-primary bg-muted'
+                    )}
+                  >
+                    <div className='flex flex-wrap items-center justify-between gap-2'>
+                      <div>
+                        <div className='font-medium'>{adapter.label}</div>
+                        <div className='font-mono text-xs text-muted-foreground'>
+                          {adapter.id} / {adapter.vendor || 'SysML DocGen'} / v{adapter.version || '1.0.0'}
+                        </div>
+                      </div>
+                      <Badge variant={adapter.can_write ? 'secondary' : 'outline'}>
+                        {adapter.can_write ? 'read/write' : 'read only'}
+                      </Badge>
+                    </div>
+                    <div className='mt-3 flex flex-wrap gap-1.5'>
+                      <CapabilityBadge enabled={adapter.can_read} label='读' />
+                      <CapabilityBadge enabled={adapter.can_write} label='写' />
+                      <CapabilityBadge enabled={adapter.can_validate} label='校验' />
+                      <CapabilityBadge enabled={adapter.can_commit} label='提交' />
+                      <CapabilityBadge enabled={adapter.can_rollback} label='回滚' />
+                    </div>
+                    {adapter.limitations?.length ? (
+                      <p className='mt-2 line-clamp-2 text-xs text-muted-foreground'>
+                        {adapter.limitations.join('；')}
+                      </p>
+                    ) : null}
+                  </button>
+                ))}
+              </div>
+            ) : (
+              <EmptyState title='未加载适配器' description='点击刷新读取服务端能力声明' />
+            )}
+          </CardContent>
+        </Card>
+
+        <Card className='sysml-card'>
+          <CardHeader>
+            <CardTitle>导入设置</CardTitle>
+            <CardDescription>
+              解析成功后可导入当前项目分支，并选择是否自动提交
+            </CardDescription>
+          </CardHeader>
+          <CardContent className='space-y-4'>
+            <Field label='适配器'>
+              <Select value={props.tool} onValueChange={props.setTool}>
+                <SelectTrigger className='w-full'>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {props.adapters.map((adapter) => (
+                    <SelectItem key={adapter.id} value={adapter.id}>
+                      {adapter.label}
+                    </SelectItem>
+                  ))}
+                  {!props.adapters.length && <SelectItem value='json'>JSON</SelectItem>}
+                </SelectContent>
+              </Select>
+            </Field>
+            <Field label='文件名'>
+              <Input
+                value={props.filename}
+                onChange={(event) => props.setFilename(event.target.value)}
+                placeholder='model.json / model.xmi / analysis.ipynb'
+              />
+            </Field>
+            <label className='flex items-center gap-2 text-sm'>
+              <Checkbox
+                checked={props.commit}
+                onCheckedChange={(checked) => props.setCommit(Boolean(checked))}
+              />
+              导入后自动提交
+            </label>
+            <Field label='提交说明'>
+              <Input
+                value={props.message}
+                onChange={(event) => props.setMessage(event.target.value)}
+                disabled={!props.commit}
+              />
+            </Field>
+            {selectedAdapter && (
+              <Alert>
+                <Wrench className='size-4' />
+                <AlertTitle>{selectedAdapter.label}</AlertTitle>
+                <AlertDescription>
+                  扩展名：{(selectedAdapter.supported_extensions || selectedAdapter.formats).join(', ')}
+                  ；能力：{adapterCapabilityText(selectedAdapter)}
+                </AlertDescription>
+              </Alert>
+            )}
+          </CardContent>
+        </Card>
+      </div>
+
+      <div className='space-y-4'>
+        <Card className='sysml-card'>
+          <CardHeader>
+            <div className='flex items-center justify-between gap-3'>
+              <div>
+                <CardTitle>模型内容解析</CardTitle>
+                <CardDescription>上传文件或粘贴 JSON、XMI、Notebook、MATLAB 标记内容</CardDescription>
+              </div>
+              <div className='flex gap-2'>
+                <Button variant='outline' asChild>
+                  <label>
+                    <Upload className='size-4' />
+                    上传并解析
+                    <input
+                      type='file'
+                      className='hidden'
+                      accept='.json,.xmi,.xml,.ipynb,.m,.mlx'
+                      onChange={handleFileChange}
+                    />
+                  </label>
+                </Button>
+                <Button
+                  variant='outline'
+                  onClick={() => props.onParse()}
+                  disabled={props.busy === 'mdk-parse'}
+                >
+                  {props.busy === 'mdk-parse' ? (
+                    <Loader2 className='size-4 animate-spin' />
+                  ) : (
+                    <Search className='size-4' />
+                  )}
+                  重新解析
+                </Button>
+                <Button
+                  variant='outline'
+                  onClick={props.onCreateJob}
+                  disabled={props.busy === 'mdk-job'}
+                >
+                  {props.busy === 'mdk-job' ? (
+                    <Loader2 className='size-4 animate-spin' />
+                  ) : (
+                    <Archive className='size-4' />
+                  )}
+                  创建任务
+                </Button>
+                <Button
+                  onClick={props.onApplyJob}
+                  disabled={!canApply || props.busy === 'mdk-apply'}
+                >
+                  {props.busy === 'mdk-apply' ? (
+                    <Loader2 className='size-4 animate-spin' />
+                  ) : (
+                    <Save className='size-4' />
+                  )}
+                  确认导入
+                </Button>
+              </div>
+            </div>
+          </CardHeader>
+          <CardContent className='space-y-4'>
+            <Textarea
+              className='min-h-[340px] font-mono text-xs'
+              value={props.content}
+              onChange={(event) => props.setContent(event.target.value)}
+            />
+            {props.parseResult && (
+              <div className='grid gap-3 sm:grid-cols-4'>
+                <MdkMetric label='元素' value={props.parseResult.parsed_model.element_count} />
+                <MdkMetric label='跳过' value={report?.skipped.length || 0} />
+                <MdkMetric label='转换' value={report?.converted.length || 0} />
+                <MdkMetric label='降级' value={report?.downgraded.length || 0} />
+              </div>
+            )}
+          </CardContent>
+        </Card>
+
+        {props.importJob && (
+          <Card className='sysml-card'>
+            <CardHeader>
+              <div className='flex items-center justify-between gap-3'>
+                <div>
+                  <CardTitle>导入任务</CardTitle>
+                  <CardDescription>{props.importJob.id}</CardDescription>
+                </div>
+                <Badge variant={props.importJob.status === 'applied' ? 'secondary' : 'outline'}>
+                  {props.importJob.status}
+                </Badge>
+              </div>
+            </CardHeader>
+            <CardContent className='grid gap-3 text-sm sm:grid-cols-2'>
+              <div>
+                <span className='text-muted-foreground'>目标：</span>
+                {props.importJob.project} / {props.importJob.branch}
+              </div>
+              <div>
+                <span className='text-muted-foreground'>来源：</span>
+                {props.importJob.adapter} / {props.importJob.filename || '-'}
+              </div>
+              <div>
+                <span className='text-muted-foreground'>创建：</span>
+                {props.importJob.created_by} / {props.importJob.created_at}
+              </div>
+              <div>
+                <span className='text-muted-foreground'>应用：</span>
+                {props.importJob.applied_at || '等待确认'}
+              </div>
+            </CardContent>
+          </Card>
+        )}
+
+        <Card className='sysml-card'>
+          <CardHeader>
+            <div className='flex items-center justify-between gap-3'>
+              <div>
+                <CardTitle>映射报告</CardTitle>
+                <CardDescription>
+                  {props.parseResult
+                    ? `${props.parseResult.parsed_model.adapter} / ${props.parseResult.parsed_model.type}`
+                    : '解析后显示转换、跳过和降级详情'}
+                </CardDescription>
+              </div>
+              {props.parseResult && (
+                <Badge variant='secondary'>
+                  imported {props.parseResult.mapping_report.imported}
+                </Badge>
+              )}
+            </div>
+          </CardHeader>
+          <CardContent>
+            {props.parseResult ? (
+              <div className='grid gap-4 xl:grid-cols-2'>
+                <MappingReportGroup
+                  title='跳过'
+                  items={props.parseResult.mapping_report.skipped}
+                  empty='没有跳过的内容'
+                />
+                <MappingReportGroup
+                  title='转换'
+                  items={props.parseResult.mapping_report.converted}
+                  empty='没有需要转换的内容'
+                />
+                <MappingReportGroup
+                  title='降级'
+                  items={props.parseResult.mapping_report.downgraded}
+                  empty='没有降级内容'
+                />
+                <div className='rounded-md border p-3'>
+                  <h3 className='mb-2 text-sm font-semibold'>警告</h3>
+                  {props.parseResult.mapping_report.warnings.length ? (
+                    <div className='space-y-2 text-sm'>
+                      {props.parseResult.mapping_report.warnings.map((warning) => (
+                        <div key={warning} className='rounded-md bg-muted p-2'>
+                          {warning}
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className='text-sm text-muted-foreground'>没有警告</p>
+                  )}
+                </div>
+              </div>
+            ) : (
+              <EmptyState title='等待解析' description='粘贴外部模型内容后点击解析' />
+            )}
+          </CardContent>
+        </Card>
+
+        {props.parseResult?.parsed_model.elements.length ? (
+          <Card className='sysml-card'>
+            <CardHeader>
+              <CardTitle>解析出的元素</CardTitle>
+              <CardDescription>
+                {props.parseResult.parsed_model.elements.length} 个元素将导入当前分支
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <ScrollArea className='h-[220px] rounded-md border'>
+                <div className='divide-y'>
+                  {props.parseResult.parsed_model.elements.map((element) => (
+                    <div key={element.id} className='px-3 py-2 text-sm'>
+                      <div className='flex items-center justify-between gap-2'>
+                        <span className='font-mono font-semibold'>{element.id}</span>
+                        <Badge variant='outline'>{labelType(element.type)}</Badge>
+                      </div>
+                      <p className='truncate text-muted-foreground'>
+                        {element.name || '未命名元素'}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              </ScrollArea>
+            </CardContent>
+          </Card>
+        ) : null}
+      </div>
     </div>
   )
 }
@@ -2922,22 +4173,81 @@ function Field({
   )
 }
 
+function CapabilityBadge({ enabled, label }: { enabled: boolean; label: string }) {
+  return (
+    <Badge variant={enabled ? 'secondary' : 'outline'} className='rounded-sm'>
+      {label}
+    </Badge>
+  )
+}
+
+function MdkMetric({ label, value }: { label: string; value: number }) {
+  return (
+    <div className='rounded-md border bg-muted/25 p-3'>
+      <div className='text-xs text-muted-foreground'>{label}</div>
+      <div className='mt-1 text-2xl font-semibold'>{value}</div>
+    </div>
+  )
+}
+
+function MappingReportGroup({
+  title,
+  items,
+  empty,
+}: {
+  title: string
+  items: Record<string, unknown>[]
+  empty: string
+}) {
+  return (
+    <div className='rounded-md border p-3'>
+      <h3 className='mb-2 text-sm font-semibold'>{title}</h3>
+      {items.length ? (
+        <ScrollArea className='h-[180px]'>
+          <div className='space-y-2 pr-3 text-xs'>
+            {items.map((item, index) => (
+              <pre
+                key={`${title}-${index}`}
+                className='overflow-x-auto rounded-md bg-muted p-2 font-mono'
+              >
+                {JSON.stringify(item, null, 2)}
+              </pre>
+            ))}
+          </div>
+        </ScrollArea>
+      ) : (
+        <p className='text-sm text-muted-foreground'>{empty}</p>
+      )}
+    </div>
+  )
+}
+
+function adapterCapabilityText(adapter: MdkAdapter) {
+  const labels = [
+    adapter.can_read && '读',
+    adapter.can_write && '写',
+    adapter.can_validate && '校验',
+    adapter.can_commit && '提交',
+    adapter.can_rollback && '回滚',
+  ].filter(Boolean)
+  return labels.join('、') || '无'
+}
+
+function adapterFromFilename(filename: string, adapters: MdkAdapter[]) {
+  const lowerName = filename.toLowerCase()
+  return adapters.find((adapter) =>
+    (adapter.supported_extensions || adapter.formats).some((extension) => {
+      const normalized = extension.startsWith('.') ? extension : `.${extension}`
+      return lowerName.endsWith(normalized.toLowerCase())
+    })
+  )
+}
+
 function tabFromHash(hash: string): WorkbenchTab {
   const value = hash.replace(/^#/, '')
   return workbenchTabs.includes(value as WorkbenchTab)
     ? (value as WorkbenchTab)
     : 'model'
-}
-
-function buildViewOutline(template: string) {
-  return template
-    .split(/\r?\n/)
-    .map((line) => line.match(/^(#{1,4})\s+(.+)$/))
-    .filter((match): match is RegExpMatchArray => Boolean(match))
-    .map((match) => ({
-      level: match[1].length,
-      title: match[2].trim(),
-    }))
 }
 
 function EmptyState({
@@ -3004,6 +4314,14 @@ function countBy<T>(items: T[], getKey: (item: T) => string) {
   }, {})
 }
 
+function includedElementIds(attributesText: string) {
+  const attributes = parseJsonSafe<Record<string, unknown>>(attributesText, {})
+  const values = Array.isArray(attributes.included_elements)
+    ? attributes.included_elements
+    : []
+  return new Set(values.map(String))
+}
+
 function parseJson<T>(value: string, label: string, fallback: T): T {
   try {
     return (value.trim() ? JSON.parse(value) : fallback) as T
@@ -3052,4 +4370,202 @@ function downloadBase64(filename: string, base64Text: string, type: string) {
   link.click()
   link.remove()
   URL.revokeObjectURL(url)
+}
+
+function shortLabel(value: string, maxLength: number) {
+  if (value.length <= maxLength) return value
+  return `${value.slice(0, Math.max(0, maxLength - 1))}…`
+}
+
+function MarkdownMessage({
+  content,
+  compact,
+}: {
+  content: string
+  compact?: boolean
+}) {
+  const blocks = parseMarkdownBlocks(content)
+  return (
+    <div className={cn('space-y-3 leading-6', compact ? 'text-sm' : 'text-[15px]')}>
+      {blocks.map((block, index) => {
+        if (block.type === 'heading') {
+          const HeadingTag = block.level === 2 ? 'h3' : 'h4'
+          return (
+            <HeadingTag
+              key={`${block.type}-${index}`}
+              className={cn(
+                'font-semibold tracking-normal text-foreground',
+                block.level === 2 ? 'text-base' : 'text-sm'
+              )}
+            >
+              {renderInlineMarkdown(block.text)}
+            </HeadingTag>
+          )
+        }
+        if (block.type === 'list') {
+          return (
+            <ul key={`${block.type}-${index}`} className='space-y-1.5'>
+              {block.items.map((item, itemIndex) => (
+                <li key={`${item}-${itemIndex}`} className='flex gap-2'>
+                  <CheckCircle2 className='mt-1 size-3.5 shrink-0 text-emerald-600' />
+                  <span>{renderInlineMarkdown(item)}</span>
+                </li>
+              ))}
+            </ul>
+          )
+        }
+        if (block.type === 'table') {
+          return (
+            <div
+              key={`${block.type}-${index}`}
+              className='overflow-x-auto rounded-md border'
+            >
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    {block.headers.map((header, headerIndex) => (
+                      <TableHead key={`${header}-${headerIndex}`}>
+                        {renderInlineMarkdown(header)}
+                      </TableHead>
+                    ))}
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {block.rows.map((row, rowIndex) => (
+                    <TableRow key={`row-${rowIndex}`}>
+                      {block.headers.map((_, cellIndex) => (
+                        <TableCell key={`cell-${rowIndex}-${cellIndex}`}>
+                          {renderInlineMarkdown(row[cellIndex] || '')}
+                        </TableCell>
+                      ))}
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
+          )
+        }
+        return (
+          <p key={`${block.type}-${index}`} className='text-muted-foreground'>
+            {renderInlineMarkdown(block.text)}
+          </p>
+        )
+      })}
+    </div>
+  )
+}
+
+type MarkdownBlock =
+  | { type: 'heading'; level: number; text: string }
+  | { type: 'paragraph'; text: string }
+  | { type: 'list'; items: string[] }
+  | { type: 'table'; headers: string[]; rows: string[][] }
+
+function parseMarkdownBlocks(content: string): MarkdownBlock[] {
+  const blocks: MarkdownBlock[] = []
+  let paragraph: string[] = []
+  let listItems: string[] = []
+  let tableRows: string[][] = []
+
+  const flushParagraph = () => {
+    if (paragraph.length) {
+      blocks.push({ type: 'paragraph', text: paragraph.join(' ') })
+      paragraph = []
+    }
+  }
+  const flushList = () => {
+    if (listItems.length) {
+      blocks.push({ type: 'list', items: listItems })
+      listItems = []
+    }
+  }
+  const flushTable = () => {
+    if (tableRows.length >= 2) {
+      const [headers, separator, ...rows] = tableRows
+      if (isMarkdownTableSeparator(separator)) {
+        blocks.push({ type: 'table', headers, rows })
+      } else {
+        paragraph.push(...tableRows.map((row) => `| ${row.join(' | ')} |`))
+      }
+    } else if (tableRows.length) {
+      paragraph.push(...tableRows.map((row) => `| ${row.join(' | ')} |`))
+    }
+    tableRows = []
+  }
+
+  content.split(/\r?\n/).forEach((rawLine) => {
+    const line = rawLine.trim()
+    if (!line) {
+      flushTable()
+      flushParagraph()
+      flushList()
+      return
+    }
+    if (isMarkdownTableRow(line)) {
+      flushParagraph()
+      flushList()
+      tableRows.push(splitMarkdownTableRow(line))
+      return
+    }
+    flushTable()
+    const heading = line.match(/^(#{2,4})\s+(.+)$/)
+    if (heading) {
+      flushParagraph()
+      flushList()
+      blocks.push({
+        type: 'heading',
+        level: heading[1].length,
+        text: heading[2].trim(),
+      })
+      return
+    }
+    const list = line.match(/^[-*]\s+(.+)$/)
+    if (list) {
+      flushParagraph()
+      listItems.push(list[1].trim())
+      return
+    }
+    flushList()
+    paragraph.push(line)
+  })
+  flushTable()
+  flushParagraph()
+  flushList()
+  return blocks
+}
+
+function isMarkdownTableRow(line: string) {
+  return line.startsWith('|') && line.endsWith('|') && line.includes('|')
+}
+
+function splitMarkdownTableRow(line: string) {
+  return line
+    .replace(/^\|/, '')
+    .replace(/\|$/, '')
+    .split('|')
+    .map((cell) => cell.trim())
+}
+
+function isMarkdownTableSeparator(row: string[]) {
+  return row.length > 0 && row.every((cell) => /^:?-{3,}:?$/.test(cell.trim()))
+}
+
+function renderInlineMarkdown(text: string) {
+  const parts = text.split(/(\*\*[^*]+\*\*|`[^`]+`)/g)
+  return parts.map((part, index) => {
+    if (part.startsWith('**') && part.endsWith('**')) {
+      return <strong key={index}>{part.slice(2, -2)}</strong>
+    }
+    if (part.startsWith('`') && part.endsWith('`')) {
+      return (
+        <code
+          key={index}
+          className='rounded bg-muted px-1 py-0.5 font-mono text-[0.9em]'
+        >
+          {part.slice(1, -1)}
+        </code>
+      )
+    }
+    return <span key={index}>{part}</span>
+  })
 }

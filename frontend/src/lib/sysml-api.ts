@@ -110,6 +110,15 @@ export type DiagramPayload = {
   label: string
   nodes: DiagramNode[]
   edges: DiagramEdge[]
+  view?: SysmlElement
+}
+
+export type ViewPayload = {
+  view: SysmlElement
+  elements: SysmlElement[]
+  element_count: number
+  element_ids: string[]
+  summary: Record<string, number>
 }
 
 export type TraceRef = {
@@ -173,6 +182,104 @@ export type DocumentRecord = {
   pdf_base64?: string
 }
 
+export type AiDocgenMode = 'full' | 'summary' | 'trace' | 'review'
+
+export type AiDocgenDraft = {
+  template: string
+  model: string
+  mode: AiDocgenMode
+  summary: {
+    element_count: number
+    type_counts: Record<string, number>
+    validation: Record<string, unknown>
+  }
+}
+
+export type AiModelReview = {
+  review: string
+  model: string
+  summary: AiDocgenDraft['summary']
+}
+
+export type AiChatMessage = {
+  role: 'user' | 'assistant'
+  content: string
+}
+
+export type AiChatResponse = {
+  answer: string
+  model: string
+  summary: AiDocgenDraft['summary']
+}
+
+export type MdkAdapter = {
+  id: string
+  label: string
+  can_read: boolean
+  can_write: boolean
+  can_validate: boolean
+  can_commit: boolean
+  can_rollback: boolean
+  formats: string[]
+  vendor?: string
+  version?: string
+  supported_extensions?: string[]
+  input_mime_types?: string[]
+  output_formats?: string[]
+  schema_version?: string
+  limitations?: string[]
+}
+
+export type MappingReportEntry = Record<string, unknown>
+
+export type MappingReport = {
+  adapter: string
+  imported: number
+  skipped: MappingReportEntry[]
+  converted: MappingReportEntry[]
+  downgraded: MappingReportEntry[]
+  warnings: string[]
+}
+
+export type MdkParsePayload = {
+  filename?: string
+  tool?: string
+  adapter?: string
+  format?: string
+  content: string | Record<string, unknown>
+}
+
+export type MdkParseResponse = {
+  parsed_model: {
+    name: string
+    type: string
+    adapter: string
+    elements: SysmlElement[]
+    element_count: number
+  }
+  mapping_report: MappingReport
+}
+
+export type MdkImportJob = {
+  id: string
+  status: 'parsed' | 'applied'
+  project: string
+  branch: string
+  adapter: string
+  filename: string
+  created_at: string
+  created_by: string
+  applied_at?: string
+  applied_by?: string
+  parsed_model: MdkParseResponse['parsed_model']
+  mapping_report: MappingReport
+  apply_result?: {
+    imported?: number
+    commit?: Commit
+    mapping_report?: MappingReport
+  } | null
+}
+
 type ApiOptions = RequestInit & {
   identity?: Identity | null
   role?: SysmlRole
@@ -224,11 +331,12 @@ export async function api<T>(path: string, options: ApiOptions = {}): Promise<T>
 
   if (!response.ok) {
     let message = response.statusText
+    const errorText = await response.text()
     try {
-      const payload = await response.json()
+      const payload = JSON.parse(errorText)
       message = payload.error || payload.detail || message
     } catch {
-      message = await response.text()
+      message = errorText
     }
     throw new Error(message || '请求失败')
   }
@@ -256,6 +364,19 @@ export function defaultElement(
   const attributes = Object.fromEntries(
     (modelType?.required_attributes || []).map((key) => [key, ''])
   )
+  if (type === 'View') {
+    Object.assign(attributes, {
+      viewpoint: '',
+      included_elements: [],
+      query: {
+        types: [],
+        owners: [],
+        text: '',
+        relation_depth: 1,
+      },
+      doc_section_title: '',
+    })
+  }
   return {
     id: '',
     type,
