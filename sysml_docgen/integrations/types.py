@@ -8,6 +8,9 @@ from typing import Any
 
 @dataclass(slots=True)
 class AdapterCapabilities:
+    category: str = "model_source"
+    source_kind: str = "model"
+    description: str = ""
     can_read: bool = True
     can_write: bool = False
     can_validate: bool = True

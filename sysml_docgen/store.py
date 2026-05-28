@@ -586,12 +586,38 @@ class ModelStore:
             raise StoreError("导入数据需要 elements 数组或对象")
         imported = []
         parsed_elements = [copy.deepcopy(element) for element in iterable]
+        branch = self.get_branch(project_id, branch_name)
+        branch_elements = branch.setdefault("elements", {})
+        now = utc_now()
+        normalized_elements: dict[str, dict[str, Any]] = {}
         for element in parsed_elements:
-            element_without_relations = copy.deepcopy(element)
-            element_without_relations["relations"] = []
-            self.upsert_element(project_id, branch_name, element_without_relations, actor)
-        for element in parsed_elements:
-            imported.append(self.upsert_element(project_id, branch_name, element, actor))
+            element_type = element.get("type", "Requirement")
+            element_id = element.get("id") or self.next_element_id(branch, element_type)
+            existing = branch_elements.get(element_id, {})
+            normalized = {
+                "id": element_id,
+                "name": element.get("name", existing.get("name", element_id)),
+                "type": element_type,
+                "stereotype": element.get("stereotype", existing.get("stereotype", default_stereotype(element_type))),
+                "description": element.get("description", existing.get("description", "")),
+                "owner": element.get("owner", existing.get("owner", "")),
+                "attributes": element.get("attributes", existing.get("attributes", {})),
+                "relations": normalize_relations(element.get("relations", existing.get("relations", []))),
+                "updated_at": now,
+                "created_at": existing.get("created_at", now),
+            }
+            normalized_elements[element_id] = normalized
+
+        merged_elements = {**branch_elements, **normalized_elements}
+        for normalized in normalized_elements.values():
+            issues = validate_element(normalized, merged_elements)
+            if any(item["severity"] == "error" for item in issues):
+                raise StoreError("; ".join(item["message"] for item in issues if item["severity"] == "error"))
+        for element_id, normalized in normalized_elements.items():
+            branch_elements[element_id] = normalized
+            imported.append(copy.deepcopy(normalized))
+        self.touch_project(project_id, save=False)
+        self.save()
         self.record_audit(
             project_id,
             branch_name,
@@ -646,7 +672,12 @@ class ModelStore:
     ) -> dict[str, Any]:
         branch = project["branches"][branch_name]
         snapshot = copy.deepcopy(branch.get("elements", {}))
-        commit_id = f"C-{len(project.get('commits', [])) + 1:04d}-{stable_hash(snapshot)[:6]}"
+        highest_commit_number = 0
+        for existing_commit in project.get("commits", []):
+            match = re.match(r"^C-(\d+)-", str(existing_commit.get("id", "")))
+            if match:
+                highest_commit_number = max(highest_commit_number, int(match.group(1)))
+        commit_id = f"C-{highest_commit_number + 1:04d}-{stable_hash(snapshot)[:6]}"
         commit = {
             "id": commit_id,
             "branch": branch_name,
@@ -665,6 +696,47 @@ class ModelStore:
     def list_commits(self, project_id: str) -> list[dict[str, Any]]:
         project = self.get_project(project_id)
         return [without_snapshot(commit) for commit in project.get("commits", [])]
+
+    def delete_commit(
+        self,
+        project_id: str,
+        commit_id: str,
+        actor: str = "engineer",
+    ) -> dict[str, Any]:
+        project = self.get_project(project_id)
+        commits = project.get("commits", [])
+        commit = next((item for item in commits if item.get("id") == commit_id), None)
+        if not commit:
+            raise NotFoundError(f"提交 {commit_id} 不存在")
+
+        project["commits"] = [item for item in commits if item.get("id") != commit_id]
+        project["tags"] = [
+            tag for tag in project.get("tags", []) if tag.get("commit") != commit_id
+        ]
+
+        for branch_name, branch in project.get("branches", {}).items():
+            if branch.get("head") != commit_id:
+                continue
+            next_head = next(
+                (
+                    item.get("id", "")
+                    for item in project["commits"]
+                    if item.get("branch") == branch_name
+                ),
+                "",
+            )
+            branch["head"] = next_head
+
+        self.touch_project(project_id, save=False)
+        self.save()
+        self.record_audit(
+            project_id,
+            str(commit.get("branch", "")),
+            "delete_commit",
+            actor,
+            detail=without_snapshot(commit),
+        )
+        return {"deleted": commit_id}
 
     def find_commit(self, project_id: str, commit_id: str) -> dict[str, Any]:
         project = self.get_project(project_id)

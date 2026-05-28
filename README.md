@@ -6,7 +6,7 @@
 
 - `MMS` 模型管理：项目、分支、元素 CRUD、提交快照、标签、差异比较、回滚、合并、审计日志。
 - `VE` 视图编辑器：浏览器内查看和编辑 SysML 元素，展示需求图、结构图、行为图和追踪矩阵。
-- `MDK` 工具集成：提供可复用 Python 客户端、命令行入口、Cameo XMI、Jupyter Notebook 和 MATLAB 分析脚本适配器。
+- `MDK` 工具集成：提供可复用 Python 客户端和命令行入口，按“模型来源”和“验证证据来源”组织 JSON、XMI/Cameo Export、SysML v2/SysON、Jupyter、MATLAB 适配器。
 - `DocGen` 文档生成：按模板生成 Markdown、HTML、PDF，并写入模型指纹、来源分支、来源提交和追踪矩阵。
 - 账号隔离：演示账号统一为普通用户；每个用户登录后只看到并操作自己的独立示例项目。
 
@@ -23,11 +23,12 @@ python server.py --host 127.0.0.1 --port 8000
 
 If `frontend/dist` is missing, the service now returns a clear error instead of silently falling back to the legacy `static/` frontend.
 
-## 重构记录
+## 文档
 
-后端分层重构说明见：
-
-- [docs/backend-refactor-notes.md](docs/backend-refactor-notes.md)
+- [用户手册](docs/user-manual.md) — 面向最终用户的完整操作指南
+- [API 文档](docs/api.md) — REST API 接口说明
+- [MDK 集成](docs/mdk.md) — 外部工具集成指南
+- [后端重构记录](docs/backend-refactor-notes.md) — 后端分层重构说明
 
 打开：
 
@@ -59,13 +60,26 @@ http://127.0.0.1:8000/docs
 4. 点击“保存快照”，将当前模型提交到 MMS。
 5. 在“追踪矩阵”和“SysML 语义校验”中检查需求闭环。
 6. 在”文档生成”中编辑 DocGen 模板并生成 HTML、Markdown、PDF、Word (DOCX)。
-7. 使用导出或 `tools/mdk_sync.py` 与外部工具交换 JSON/XMI 模型。
+7. 使用导出或 `tools/mdk_sync.py` 与外部工具交换模型结构，或导入分析/仿真工具产生的验证证据。
+
+## MDK 适配器结构
+
+当前 MDK 不再按“文件解析器”罗列能力，而是按工程语义分为两类：
+
+| 类别 | 适配器 | 当前能力 |
+| --- | --- | --- |
+| 模型来源 | SysML JSON Exchange | 导入/导出系统内部或外部工具产生的结构化 JSON 模型。 |
+| 模型来源 | XMI / Cameo Export | 导入标准 XMI，也支持 Cameo/MagicDraw 导出的 XMI 文件。当前不是 Cameo 原生插件或双向同步。 |
+| 模型来源 | SysML v2 Text / SysON | 导入轻量 SysML v2 / SysON 文本模型子集。 |
+| 验证证据来源 | Jupyter Analysis Evidence | 导入 Notebook 中的分析结果、验证关系和需求验证证据。 |
+| 验证证据来源 | MATLAB Simulation Evidence | 导入 MATLAB 脚本中的仿真结果、测试用例和验证证据。 |
 
 ## MDK 命令行示例
 
 ```powershell
 python tools/mdk_sync.py parse --file data/import_example.json --tool json
 python tools/mdk_sync.py push --file data/import_example.json --tool json --commit --validate
+python tools/mdk_sync.py push --file data/upload_graph_test.xmi --tool xmi --commit --validate
 python tools/mdk_sync.py push --file mdk/jupyter/example_analysis.ipynb --tool jupyter --commit --validate
 python tools/mdk_sync.py push --file mdk/matlab/example_analysis.m --tool matlab --commit --validate
 python tools/mdk_sync.py pull --format json --out data/exported_model.json
@@ -209,20 +223,27 @@ winget install wkhtmltopdf          # WebKit → PDF
 - **HTML**：语法高亮、智能排版、更丰富的 CSS（斑马纹表格、响应式、打印优化）
 - **PDF**：多引擎支持（WeasyPrint / LaTeX / wkhtmltopdf）
 - **Word (DOCX)**：新增格式，支持参考模板自定义样式（`SYSML_DOCX_REFERENCE`）
-## 协作关系与数据库设计
+## 协作关系与数据库结构
 
-当前这套项目的协作关系不是靠“三个演示角色”，而是靠“用户 - 工作台 - 共享项目成员”三层结构来表达。
+本系统的协作关系不再依赖固定演示角色，而是用“用户 - 个人工作台 - 共享项目成员”来表达。每个用户登录后都有自己的空工作台；多人协作时，通过共享项目的成员列表决定谁能访问、谁能编辑。
 
-- `users`：保存登录账号、密码哈希、显示名、普通用户身份。
-- `projects`：保存项目本体，包含 `owner`、`visibility`、`kind`、`members`、`source_project_id`、`published_*`、`copied_*` 等字段。
-- `branches` / `elements` / `commits` / `documents`：都挂在项目之下，个人工作台和共享项目都遵循同一套模型结构。
+核心数据结构如下：
 
-协作规则：
+- `users`：保存登录账号、密码哈希、显示名、账号角色等身份信息。
+- `projects`：保存项目本体。关键字段包括 `id`、`name`、`owner`、`visibility`、`kind`、`members`、`source_project_id`、`published_from`、`copied_from` 等。
+- `members`：项目内的协作成员列表，存放在项目数据中，格式为 `[{ "username": "teacher1", "role": "editor" }]`。
+- `branches` / `elements` / `commits` / `documents`：都挂在项目下面，个人工作台、共享项目、个人副本使用同一套模型结构。
 
-1. 登录后默认只进入自己的空工作台，格式通常是 `workspace-用户名`。
-2. 工作台默认是空的，不再自动注入示例元素。
-3. 新建项目默认创建为共享项目，可以直接指定协作成员。
-4. “发布到共享库”会把个人工作台发布成共享项目。
-5. “从共享库复制到个人工作台”会生成一个私有副本。
+成员权限规则：
 
-也就是说，共享关系由项目成员表来决定，不再靠硬编码的示例账号。
+- `owner`：项目所有者，可以编辑、发布、复制和管理项目。
+- `editor`：协作者，可以共同创建和修改模型元素。
+- `viewer`：只读成员，可以查看共享项目，但不能写入。
+
+协作流程：
+
+1. **新建共享项目**：进入“项目管理”，点击“新建共享项目”，填写成员，例如 `teacher1:editor, reviewer:viewer`。项目会以 `visibility=shared`、`kind=shared` 保存。
+2. **发布到共享库**：在个人工作台或个人副本中点击“发布到共享库”，系统会复制当前项目内容，生成一个共享项目，并记录 `published_from`、`published_by`、`published_at`。
+3. **从共享库复制到个人工作台**：共享项目成员可以点击“复制到我的工作台”，系统会生成一个私有副本，记录 `copied_from`、`copied_by`、`copied_at`。之后该副本只属于复制者本人。
+
+也就是说，用户之间是否为“队友”，由共享项目的 `members` 字段决定；不是队友就看不到项目，是 `viewer` 就只能看，是 `editor` 才能共同编辑。

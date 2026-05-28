@@ -1,21 +1,17 @@
 import { useLayout } from '@/context/layout-provider'
-import { loadIdentity } from '@/lib/sysml-api'
 import {
   Sidebar,
   SidebarContent,
-  SidebarFooter,
   SidebarHeader,
   SidebarRail,
 } from '@/components/ui/sidebar'
 // import { AppTitle } from './app-title'
 import { sidebarData } from './data/sidebar-data'
 import { NavGroup } from './nav-group'
-import { NavUser } from './nav-user'
 import { TeamSwitcher } from './team-switcher'
 
 export function AppSidebar() {
   const { collapsible, variant } = useLayout()
-  const identity = loadIdentity()
   return (
     <Sidebar collapsible={collapsible} variant={variant}>
       <SidebarHeader>
@@ -30,15 +26,6 @@ export function AppSidebar() {
           <NavGroup key={props.title} {...props} />
         ))}
       </SidebarContent>
-      <SidebarFooter>
-        <NavUser
-          user={{
-            name: identity?.display || identity?.username || 'Guest',
-            email: identity?.username || 'Guest',
-            avatar: '',
-          }}
-        />
-      </SidebarFooter>
       <SidebarRail />
     </Sidebar>
   )

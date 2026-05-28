@@ -21,7 +21,11 @@ class FastApiAppTest(unittest.TestCase):
         self.original_frontend_mode = getattr(app.state, "frontend_mode", None)
         app.state.store = ModelStore(Path(self.temp_dir.name) / "store.sqlite3")
         self.client = TestClient(app)
-        for username, password in (("engineer", "engineer123"), ("teacher", "teacher123")):
+        for username, password in (
+            ("engineer", "engineer123"),
+            ("teacher", "teacher123"),
+            ("reviewer", "reviewer123"),
+        ):
             response = self.client.post(
                 "/api/auth/register",
                 json={"username": username, "password": password},
@@ -157,6 +161,201 @@ class FastApiAppTest(unittest.TestCase):
         teacher_ids = {item["id"] for item in teacher.json()["projects"]}
         self.assertIn("engineering-shared", teacher_ids)
 
+    def test_publish_project_updates_existing_shared_version(self):
+        first = self.client.post(
+            "/api/projects/workspace-engineer/publish",
+            json={"id": "engineer-workspace-shared", "name": "Engineer Shared"},
+            headers={"X-User": "engineer", "X-Role": "user"},
+        )
+        self.assertEqual(first.status_code, 200)
+        shared_id = first.json()["project"]["id"]
+
+        created = self.client.post(
+            "/api/projects/workspace-engineer/branches/main/elements",
+            json={"id": "REQ-UPDATED-SHARE", "name": "Updated shared requirement", "type": "Requirement"},
+            headers={"X-User": "engineer", "X-Role": "user"},
+        )
+        self.assertEqual(created.status_code, 200)
+
+        second = self.client.post(
+            "/api/projects/workspace-engineer/publish",
+            json={"id": "another-id-should-not-be-used", "name": "Engineer Shared Updated"},
+            headers={"X-User": "engineer", "X-Role": "user"},
+        )
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(second.json()["project"]["id"], shared_id)
+        self.assertIn(
+            "REQ-UPDATED-SHARE",
+            second.json()["project"]["branches"]["main"]["elements"],
+        )
+
+        projects = self.client.get("/api/projects", headers={"X-User": "engineer", "X-Role": "user"})
+        shared_versions = [
+            project
+            for project in projects.json()["projects"]
+            if project.get("published_from") == "workspace-engineer"
+        ]
+        self.assertEqual(len(shared_versions), 1)
+
+    def test_delete_project_removes_owned_non_workspace(self):
+        created = self.client.post(
+            "/api/projects",
+            json={"id": "delete-me-shared", "name": "Delete Me"},
+            headers={"X-User": "engineer", "X-Role": "user"},
+        )
+        self.assertEqual(created.status_code, 200)
+
+        deleted = self.client.delete(
+            "/api/projects/delete-me-shared",
+            headers={"X-User": "engineer", "X-Role": "user"},
+        )
+        self.assertEqual(deleted.status_code, 200)
+        self.assertEqual(deleted.json()["deleted"], "delete-me-shared")
+
+        projects = self.client.get("/api/projects", headers={"X-User": "engineer", "X-Role": "user"})
+        ids = {project["id"] for project in projects.json()["projects"]}
+        self.assertNotIn("delete-me-shared", ids)
+
+    def test_delete_project_blocks_personal_workspace(self):
+        deleted = self.client.delete(
+            "/api/projects/workspace-engineer",
+            headers={"X-User": "engineer", "X-Role": "user"},
+        )
+        self.assertEqual(deleted.status_code, 403)
+
+    def test_shared_project_editor_can_write(self):
+        created = self.client.post(
+            "/api/projects",
+            json={
+                "id": "editable-shared",
+                "name": "Editable Shared",
+                "members": [{"username": "teacher", "role": "editor"}],
+            },
+            headers={"X-User": "engineer", "X-Role": "user"},
+        )
+        self.assertEqual(created.status_code, 200)
+
+        written = self.client.post(
+            "/api/projects/editable-shared/branches/main/elements",
+            json={"id": "REQ-EDITOR", "name": "Editor can write", "type": "Requirement"},
+            headers={"X-User": "teacher", "X-Role": "reader"},
+        )
+        self.assertEqual(written.status_code, 200)
+
+    def test_shared_project_member_string_supports_roles(self):
+        created = self.client.post(
+            "/api/projects",
+            json={
+                "id": "role-string-shared",
+                "name": "Role String Shared",
+                "members": "teacher:editor, reviewer:viewer",
+            },
+            headers={"X-User": "engineer", "X-Role": "user"},
+        )
+        self.assertEqual(created.status_code, 200)
+        members = {
+            item["username"]: item["role"]
+            for item in created.json()["project"]["members"]
+        }
+        self.assertEqual(members["teacher"], "editor")
+        self.assertEqual(members["reviewer"], "viewer")
+
+    def test_create_shared_project_rejects_unknown_members(self):
+        created = self.client.post(
+            "/api/projects",
+            json={
+                "id": "unknown-member-shared",
+                "name": "Unknown Member Shared",
+                "members": "missinguser:editor",
+            },
+            headers={"X-User": "engineer", "X-Role": "user"},
+        )
+        self.assertEqual(created.status_code, 403)
+
+        projects = self.client.get("/api/projects", headers={"X-User": "engineer", "X-Role": "user"})
+        ids = {project["id"] for project in projects.json()["projects"]}
+        self.assertNotIn("unknown-member-shared", ids)
+
+    def test_update_project_members_changes_editor_and_viewer(self):
+        created = self.client.post(
+            "/api/projects",
+            json={"id": "member-update-shared", "name": "Member Update Shared", "members": "teacher:viewer"},
+            headers={"X-User": "engineer", "X-Role": "user"},
+        )
+        self.assertEqual(created.status_code, 200)
+
+        updated = self.client.put(
+            "/api/projects/member-update-shared/members",
+            json={"members": "teacher:editor, reviewer:viewer"},
+            headers={"X-User": "engineer", "X-Role": "user"},
+        )
+        self.assertEqual(updated.status_code, 200)
+        members = {
+            item["username"]: item["role"]
+            for item in updated.json()["project"]["members"]
+        }
+        self.assertEqual(members["engineer"], "owner")
+        self.assertEqual(members["teacher"], "editor")
+        self.assertEqual(members["reviewer"], "viewer")
+
+    def test_update_project_members_rejects_unknown_members(self):
+        created = self.client.post(
+            "/api/projects",
+            json={"id": "member-update-unknown", "name": "Member Update Unknown"},
+            headers={"X-User": "engineer", "X-Role": "user"},
+        )
+        self.assertEqual(created.status_code, 200)
+
+        updated = self.client.put(
+            "/api/projects/member-update-unknown/members",
+            json={"members": "ghostuser:viewer"},
+            headers={"X-User": "engineer", "X-Role": "user"},
+        )
+        self.assertEqual(updated.status_code, 403)
+
+    def test_shared_project_without_branches_gets_main_branch(self):
+        store = app.state.store
+        store.data.setdefault("projects", {})["legacy-shared-empty"] = {
+            "id": "legacy-shared-empty",
+            "name": "Legacy Shared Empty",
+            "description": "",
+            "organization": "Legacy",
+            "owner": "engineer",
+            "visibility": "shared",
+            "kind": "shared",
+            "members": [{"username": "engineer", "role": "owner"}],
+            "branches": {},
+            "commits": [],
+            "tags": [],
+        }
+        store.save()
+
+        response = self.client.get(
+            "/api/projects/legacy-shared-empty/branches",
+            headers={"X-User": "engineer", "X-Role": "user"},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["branches"][0]["name"], "main")
+
+    def test_shared_project_viewer_cannot_write(self):
+        created = self.client.post(
+            "/api/projects",
+            json={
+                "id": "readonly-shared",
+                "name": "Readonly Shared",
+                "members": [{"username": "teacher", "role": "viewer"}],
+            },
+            headers={"X-User": "engineer", "X-Role": "user"},
+        )
+        self.assertEqual(created.status_code, 200)
+
+        blocked = self.client.post(
+            "/api/projects/readonly-shared/branches/main/elements",
+            json={"id": "REQ-VIEWER", "name": "Viewer cannot write", "type": "Requirement"},
+            headers={"X-User": "teacher", "X-Role": "user"},
+        )
+        self.assertEqual(blocked.status_code, 403)
+
     def test_copy_shared_project_creates_private_workspace_copy(self):
         created = self.client.post(
             "/api/projects",
@@ -228,11 +427,58 @@ class FastApiAppTest(unittest.TestCase):
         response = self.client.get("/api/mdk/adapters")
         self.assertEqual(response.status_code, 200)
         adapters = {adapter["id"]: adapter for adapter in response.json()["adapters"]}
-        self.assertIn("cameo", adapters)
-        self.assertFalse(adapters["cameo"]["can_write"])
-        self.assertIn("xmi", adapters["cameo"]["formats"])
-        self.assertEqual(adapters["cameo"]["vendor"], "Dassault Systemes")
-        self.assertIn(".xmi", adapters["cameo"]["supported_extensions"])
+        self.assertEqual(
+            list(adapters),
+            ["json", "xmi", "sysmlv2", "jupyter", "matlab"],
+        )
+        self.assertNotIn("cameo", adapters)
+        self.assertEqual(adapters["json"]["label"], "SysML JSON Exchange")
+        self.assertEqual(adapters["xmi"]["label"], "XMI / Cameo Export")
+        self.assertEqual(adapters["sysmlv2"]["label"], "SysML v2 Text / SysON")
+        self.assertEqual(adapters["jupyter"]["category"], "evidence_source")
+        self.assertEqual(adapters["matlab"]["source_kind"], "verification_evidence")
+        self.assertIn(".xmi", adapters["xmi"]["supported_extensions"])
+        self.assertIn("Cameo", adapters["xmi"]["description"])
+
+    def test_mdk_parse_accepts_cameo_alias_as_xmi_export(self):
+        response = self.client.post(
+            "/api/mdk/parse",
+            json={
+                "filename": "cameo-export.xmi",
+                "tool": "cameo",
+                "content": """<?xml version="1.0" encoding="UTF-8"?>
+<xmi:XMI xmlns:xmi="http://www.omg.org/spec/XMI/20131001"
+         xmlns:uml="http://www.omg.org/spec/UML/20131001">
+  <uml:Model xmi:id="MODEL" name="Demo">
+    <packagedElement xmi:type="uml:Class" xmi:id="BLK-CAMEO-XMI" name="CameoExportBlock" stereotype="block"/>
+  </uml:Model>
+</xmi:XMI>""",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["parsed_model"]["adapter"], "xmi")
+        self.assertEqual(payload["mapping_report"]["imported"], 1)
+
+    def test_mdk_parse_accepts_syson_sysmlv2_text(self):
+        response = self.client.post(
+            "/api/mdk/parse",
+            json={
+                "filename": "model.sysml",
+                "tool": "syson",
+                "content": """
+requirement REQ-SYSON-001 "SysON text requirement";
+part BLK-SYSON-POWER "Power block";
+satisfy BLK-SYSON-POWER REQ-SYSON-001;
+""",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        elements = {element["id"]: element for element in payload["parsed_model"]["elements"]}
+        self.assertEqual(payload["parsed_model"]["adapter"], "sysmlv2")
+        self.assertIn("REQ-SYSON-001", elements)
+        self.assertIn({"type": "satisfy", "target": "REQ-SYSON-001"}, elements["BLK-SYSON-POWER"]["relations"])
 
     def test_mdk_parse_returns_mapping_report(self):
         response = self.client.post(

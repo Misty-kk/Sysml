@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { z } from 'zod'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
@@ -19,6 +19,7 @@ import {
   FormMessage,
 } from '@/components/ui/form'
 import { Input } from '@/components/ui/input'
+import { Checkbox } from '@/components/ui/checkbox'
 import { PasswordInput } from '@/components/password-input'
 
 const formSchema = z.object({
@@ -31,7 +32,118 @@ const formSchema = z.object({
     .string()
     .min(1, '请输入密码。')
     .min(7, '密码至少需要 7 位。'),
+  rememberPassword: z.boolean(),
 })
+
+const rememberedLoginKey = 'sysml_remembered_login'
+
+interface RememberedLoginStore {
+  lastUsername: string
+  credentials: Record<string, string>
+}
+
+function loadRememberedLoginStore(): RememberedLoginStore {
+  if (typeof window === 'undefined') {
+    return { lastUsername: '', credentials: {} }
+  }
+
+  try {
+    const raw = window.localStorage.getItem(rememberedLoginKey)
+    if (!raw) return { lastUsername: '', credentials: {} }
+
+    const parsed = JSON.parse(raw) as Partial<{
+      lastUsername: string
+      username: string
+      password: string
+      credentials: Record<string, string>
+    }>
+
+    if (parsed.credentials && typeof parsed.credentials === 'object') {
+      const credentials = Object.fromEntries(
+        Object.entries(parsed.credentials).filter(
+          (entry): entry is [string, string] =>
+            typeof entry[0] === 'string' && typeof entry[1] === 'string'
+        )
+      )
+
+      return {
+        lastUsername: parsed.lastUsername ?? Object.keys(credentials)[0] ?? '',
+        credentials,
+      }
+    }
+
+    if (parsed.username && parsed.password) {
+      return {
+        lastUsername: parsed.username,
+        credentials: {
+          [parsed.username]: parsed.password,
+        },
+      }
+    }
+
+    return { lastUsername: '', credentials: {} }
+  } catch {
+    window.localStorage.removeItem(rememberedLoginKey)
+    return { lastUsername: '', credentials: {} }
+  }
+}
+
+function loadRememberedLogin() {
+  const store = loadRememberedLoginStore()
+  const username = store.lastUsername
+  const password = username ? store.credentials[username] ?? '' : ''
+
+  return {
+    username,
+    password,
+    rememberPassword: Boolean(username && password),
+  }
+}
+
+function getRememberedPassword(username: string) {
+  const store = loadRememberedLoginStore()
+  const password = store.credentials[username]
+  return typeof password === 'string' ? password : null
+}
+
+function saveRememberedLogin(username: string, password: string) {
+  if (typeof window === 'undefined') return
+
+  const store = loadRememberedLoginStore()
+  const nextStore: RememberedLoginStore = {
+    lastUsername: username,
+    credentials: {
+      ...store.credentials,
+      [username]: password,
+    },
+  }
+
+  window.localStorage.setItem(rememberedLoginKey, JSON.stringify(nextStore))
+}
+
+function clearRememberedLogin(username: string) {
+  if (typeof window === 'undefined') return
+
+  const store = loadRememberedLoginStore()
+  const credentials = { ...store.credentials }
+  delete credentials[username]
+
+  if (Object.keys(credentials).length === 0) {
+    window.localStorage.removeItem(rememberedLoginKey)
+    return
+  }
+
+  window.localStorage.setItem(
+    rememberedLoginKey,
+    JSON.stringify({
+      lastUsername:
+        store.lastUsername === username
+          ? Object.keys(credentials)[0]
+          : store.lastUsername,
+      credentials,
+    })
+  )
+}
 
 interface UserAuthFormProps extends React.HTMLAttributes<HTMLFormElement> {}
 
@@ -40,23 +152,40 @@ export function UserAuthForm({ className, ...props }: UserAuthFormProps) {
   const [serverError, setServerError] = useState('')
   const navigate = useNavigate()
   const { auth } = useAuthStore()
+  const rememberedLogin = loadRememberedLogin()
 
   const form = useForm<z.infer<typeof formSchema>>({
     resolver: zodResolver(formSchema),
     defaultValues: {
-      username: '',
-      password: '',
+      username: rememberedLogin.username,
+      password: rememberedLogin.password,
+      rememberPassword: rememberedLogin.rememberPassword,
     },
   })
+  const watchedUsername = form.watch('username')
+
+  useEffect(() => {
+    const username = watchedUsername.trim()
+    const password = username ? getRememberedPassword(username) : null
+
+    form.setValue('password', password ?? '')
+    form.setValue('rememberPassword', Boolean(password))
+  }, [form, watchedUsername])
 
   async function onSubmit(data: z.infer<typeof formSchema>) {
     setIsLoading(true)
     setServerError('')
 
     try {
-      const payload = await login(data.username.trim(), data.password)
+      const username = data.username.trim()
+      const payload = await login(username, data.password)
       const identity = payload.identity
       saveIdentity(identity)
+      if (data.rememberPassword) {
+        saveRememberedLogin(username, data.password)
+      } else {
+        clearRememberedLogin(username)
+      }
       auth.setUser({
         accountNo: 'ACC001',
         email: identity.username,
@@ -110,7 +239,7 @@ export function UserAuthForm({ className, ...props }: UserAuthFormProps) {
           control={form.control}
           name='password'
           render={({ field }) => (
-            <FormItem className='relative'>
+            <FormItem>
               <FormLabel>Password</FormLabel>
               <FormControl>
                 <PasswordInput
@@ -120,15 +249,36 @@ export function UserAuthForm({ className, ...props }: UserAuthFormProps) {
                 />
               </FormControl>
               <FormMessage />
-              <Link
-                to='/forgot-password'
-                className='absolute inset-e-0 -top-0.5 text-sm font-medium text-muted-foreground hover:opacity-75'
-              >
-                忘记密码？
-              </Link>
             </FormItem>
           )}
         />
+        <div className='flex items-center justify-between gap-3'>
+          <FormField
+            control={form.control}
+            name='rememberPassword'
+            render={({ field }) => (
+              <FormItem className='flex flex-row items-center gap-2 space-y-0'>
+                <FormControl>
+                  <Checkbox
+                    checked={field.value}
+                    onCheckedChange={(checked) =>
+                      field.onChange(checked === true)
+                    }
+                  />
+                </FormControl>
+                <FormLabel className='cursor-pointer text-sm font-normal'>
+                  记住密码
+                </FormLabel>
+              </FormItem>
+            )}
+          />
+          <Link
+            to='/forgot-password'
+            className='shrink-0 text-sm font-medium text-muted-foreground hover:opacity-75'
+          >
+            忘记密码？
+          </Link>
+        </div>
         <Button type='submit' className='mt-2' disabled={isLoading}>
           {isLoading ? <Loader2 className='animate-spin' /> : <LogIn />}
           登录

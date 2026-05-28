@@ -78,6 +78,12 @@ class MmsService:
     def copy_shared_project(self, project_id: str, payload: dict[str, Any], username: str) -> dict[str, Any]:
         return self.store.copy_shared_project(project_id, username, payload)
 
+    def delete_project(self, project_id: str, username: str) -> dict[str, str]:
+        return self.store.delete_project(project_id, username)
+
+    def update_project_members(self, project_id: str, payload: dict[str, Any], username: str) -> dict[str, Any]:
+        return self.store.update_project_members(project_id, payload, username)
+
     def get_project_summary(self, project_id: str) -> dict[str, Any]:
         project = self.store.get_project(project_id)
         payload = project_summary(project)
@@ -133,6 +139,9 @@ class MmsService:
 
     def list_commits(self, project_id: str) -> list[dict[str, Any]]:
         return self.store.list_commits(project_id)
+
+    def delete_commit(self, project_id: str, commit_id: str, username: str) -> dict[str, Any]:
+        return self.store.delete_commit(project_id, commit_id, username)
 
     def diff(self, project_id: str, branch: str, from_ref: str | None, to_ref: str | None) -> dict[str, Any]:
         return self.store.diff_commits(project_id, branch, from_ref, to_ref)

@@ -49,6 +49,8 @@ class RepositoryStore(Protocol):
 
     def list_commits(self, project_id: str) -> list[dict[str, Any]]: ...
 
+    def delete_commit(self, project_id: str, commit_id: str, username: str) -> dict[str, Any]: ...
+
     def diff_commits(
         self,
         project_id: str,

@@ -155,22 +155,12 @@
   --workbench-panel: color-mix(in oklch, var(--background) 92%, white 8%);
   --workbench-subtle: color-mix(in oklch, var(--muted) 62%, transparent);
   --workbench-accent: oklch(0.56 0.16 253);
-  background:
-    linear-gradient(
-      180deg,
-      color-mix(in oklch, var(--background) 82%, oklch(0.63 0.16 253) 18%) 0,
-      var(--background) 320px
-    );
+  background: #fff;
 }
 
 .dark .sysml-workbench {
   --workbench-panel: color-mix(in oklch, var(--background) 88%, white 3%);
-  background:
-    linear-gradient(
-      180deg,
-      color-mix(in oklch, var(--background) 74%, oklch(0.38 0.12 253) 26%) 0,
-      var(--background) 340px
-    );
+  background: var(--background);
 }
 
 .sysml-shell {

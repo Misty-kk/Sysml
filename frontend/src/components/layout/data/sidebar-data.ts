@@ -1,8 +1,8 @@
 import {
   Archive,
   Boxes,
-  Braces,
   Eye,
+  FileCheck2,
   FileText,
   GitBranch,
   LayoutDashboard,
@@ -21,9 +21,9 @@ export const sidebarData: SidebarData = {
   },
   teams: [
     {
-      name: 'MBSE Workspace',
-      logo: Braces,
-      plan: 'Projects / Models / Docs',
+      name: '文档自动生成系统',
+      logo: FileCheck2,
+      plan: 'SysML DocGen',
     },
     {
       name: 'Project Workspace',
@@ -33,7 +33,7 @@ export const sidebarData: SidebarData = {
     {
       name: 'External Tools',
       logo: Archive,
-      plan: 'Cameo / XMI / MDK',
+      plan: 'Models / Evidence / MDK',
     },
   ],
   navGroups: [
@@ -53,7 +53,7 @@ export const sidebarData: SidebarData = {
         {
           title: 'Workspace',
           url: '/#workspace',
-          icon: Braces,
+          icon: Boxes,
         },
       ],
     },

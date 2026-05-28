@@ -74,6 +74,111 @@ class AiDocgenService:
             "summary": self._model_summary(elements, validation),
         }
 
+    async def suggest_validation_fixes(self, project_id: str, branch: str, payload: dict[str, Any]) -> dict[str, Any]:
+        settings = self._settings()
+        if not settings["api_key"]:
+            raise HTTPException(
+                status_code=503,
+                detail="DeepSeek is not configured. Set DEEPSEEK_API_KEY before using the validation fix agent.",
+            )
+
+        project = self.store.get_project(project_id)
+        branch_payload = self.store.get_branch(project_id, branch)
+        element_map = branch_payload.get("elements", {})
+        elements = list(element_map.values())
+        traceability = build_traceability(element_map)
+        validation = self.store.validate_branch(project_id, branch)
+        issues = validation.get("issues", [])
+        focus = str(payload.get("focus") or "model")
+
+        prompt = self._build_validation_fix_prompt(project, branch, elements, traceability, validation, focus)
+        review = self._extract_markdown(await self._chat(prompt, settings))
+        return {
+            "review": review,
+            "model": settings["model"],
+            "issue_count": len(issues),
+            "summary": self._model_summary(elements, validation),
+        }
+
+    def apply_validation_fixes(self, project_id: str, branch: str, actor: str) -> dict[str, Any]:
+        branch_payload = self.store.get_branch(project_id, branch)
+        element_map = branch_payload.get("elements", {})
+        before = self.store.validate_branch(project_id, branch)
+        fixes = self._plan_validation_fixes(element_map, before)
+        applied: list[dict[str, Any]] = []
+        skipped: list[dict[str, Any]] = []
+
+        for fix in fixes:
+            element_id = str(fix.get("element_id") or "")
+            element = element_map.get(element_id)
+            if not element:
+                skipped.append({**fix, "reason": "元素不存在"})
+                continue
+            updated = json.loads(json.dumps(element, ensure_ascii=False))
+            kind = fix.get("kind")
+            if kind == "set_name":
+                updated["name"] = fix.get("value") or element_id
+            elif kind == "set_stereotype":
+                updated["stereotype"] = fix.get("value") or str(updated.get("type", "")).lower()
+            elif kind == "set_attribute":
+                attrs = updated.setdefault("attributes", {})
+                if not isinstance(attrs, dict):
+                    attrs = {}
+                    updated["attributes"] = attrs
+                attrs[str(fix.get("attribute"))] = fix.get("value")
+            elif kind == "remove_relation":
+                relation_type = str(fix.get("relation_type") or "")
+                target_id = str(fix.get("target_id") or "")
+                updated["relations"] = [
+                    relation
+                    for relation in updated.get("relations", [])
+                    if not (
+                        str(relation.get("type", "")) == relation_type
+                        and str(relation.get("target", "")) == target_id
+                    )
+                ]
+            elif kind == "remove_from_view_scope":
+                target_id = str(fix.get("target_id") or "")
+                attrs = updated.setdefault("attributes", {})
+                if isinstance(attrs, dict):
+                    for key in ("included_elements", "elements"):
+                        value = attrs.get(key)
+                        if isinstance(value, list):
+                            attrs[key] = [item for item in value if str(item) != target_id]
+                        elif isinstance(value, str):
+                            attrs[key] = ",".join(item for item in value.split(",") if item.strip() != target_id)
+                updated["relations"] = [
+                    relation
+                    for relation in updated.get("relations", [])
+                    if not (relation.get("type") == "include" and str(relation.get("target", "")) == target_id)
+                ]
+            elif kind == "relax_viewpoint_required_type":
+                required_type = str(fix.get("required_type") or "")
+                attrs = updated.setdefault("attributes", {})
+                if not isinstance(attrs, dict):
+                    attrs = {}
+                    updated["attributes"] = attrs
+                required = attrs.get("required_types", [])
+                if isinstance(required, str):
+                    required = [item.strip() for item in required.split(",") if item.strip()]
+                if isinstance(required, list):
+                    attrs["required_types"] = [item for item in required if str(item) != required_type]
+            else:
+                skipped.append({**fix, "reason": "未知修复类型"})
+                continue
+
+            self.store.upsert_element(project_id, branch, updated, actor)
+            applied.append(fix)
+
+        after = self.store.validate_branch(project_id, branch)
+        return {
+            "applied": applied,
+            "skipped": skipped,
+            "before": before.get("summary", {}),
+            "after": after.get("summary", {}),
+            "validation": after,
+        }
+
     async def suggest_requirement_closure(
         self, project_id: str, branch: str, payload: dict[str, Any]
     ) -> dict[str, Any]:
@@ -342,6 +447,195 @@ class AiDocgenService:
             '"suggested_relations":[{"type":"verify","target":"REQ-..."}]}]}\n\n'
             f"Context JSON:\n{json.dumps(context, ensure_ascii=False, indent=2)[:18000]}"
         )
+
+    def _build_validation_fix_prompt(
+        self,
+        project: dict[str, Any],
+        branch: str,
+        elements: list[dict[str, Any]],
+        traceability: list[dict[str, Any]],
+        validation: dict[str, Any],
+        focus: str = "model",
+    ) -> str:
+        issue_ids = {str(issue.get("element_id", "")) for issue in validation.get("issues", [])}
+        related_elements = [
+            self._compact_element(item)
+            for item in elements
+            if str(item.get("id", "")) in issue_ids
+        ][:80]
+        context = {
+            "project": self._project_context(project, branch),
+            "focus": focus,
+            "model_summary": self._model_summary(elements, validation),
+            "validation": validation,
+            "related_elements": related_elements,
+            "traceability": traceability[:60],
+        }
+        focus_instruction = (
+            "本次重点修复 View/Viewpoint 相关问题：View 范围、included_elements、Viewpoint allowed_types、"
+            "required_types、allowed_relations、conform/include 关系。"
+            if focus == "view"
+            else "本次重点修复全模型语义问题。"
+        )
+        return (
+            "你是 SysML 语义校验修复 Agent。请根据 validation.issues 给出可执行修复建议。"
+            f"{focus_instruction}"
+            "只依据输入的模型上下文，不要编造不存在的元素 ID。"
+            "回答用中文 Markdown，结构固定为：\n"
+            "## 修复摘要\n"
+            "## 优先级排序\n"
+            "## 元素级修复建议\n"
+            "## 可选 JSON 补丁草案\n"
+            "## 修复后复查清单\n"
+            "元素级建议必须指出 element_id、问题原因、建议修改 attributes/relations/name/type 的哪一项。"
+            "JSON 补丁草案只作为人工确认前的候选，不要声称已经自动修改模型。\n\n"
+            f"Context JSON:\n{json.dumps(context, ensure_ascii=False, indent=2)[:18000]}"
+        )
+
+    def _plan_validation_fixes(
+        self,
+        elements: dict[str, Any],
+        validation: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        fixes: list[dict[str, Any]] = []
+        seen: set[tuple[Any, ...]] = set()
+
+        def add(fix: dict[str, Any]) -> None:
+            key = tuple(sorted((name, str(value)) for name, value in fix.items()))
+            if key not in seen:
+                seen.add(key)
+                fixes.append(fix)
+
+        for issue in validation.get("issues", []):
+            element_id = str(issue.get("element_id", ""))
+            message = str(issue.get("message", ""))
+            element = elements.get(element_id)
+            if not element:
+                continue
+
+            if "缺少名称" in message or "缂哄皯鍚嶇О" in message:
+                add({
+                    "kind": "set_name",
+                    "element_id": element_id,
+                    "value": element_id,
+                    "label": f"为 {element_id} 补齐名称",
+                })
+                continue
+
+            if "未设置构造型" in message or "鏈缃瀯閫犲瀷" in message:
+                add({
+                    "kind": "set_stereotype",
+                    "element_id": element_id,
+                    "value": self._default_stereotype(str(element.get("type", ""))),
+                    "label": f"为 {element_id} 补齐构造型",
+                })
+                continue
+
+            attribute = self._extract_missing_attribute(message)
+            if attribute:
+                add({
+                    "kind": "set_attribute",
+                    "element_id": element_id,
+                    "attribute": attribute,
+                    "value": self._default_attribute_value(str(element.get("type", "")), attribute, element),
+                    "label": f"为 {element_id} 补齐 attributes.{attribute}",
+                })
+                continue
+
+            missing_relation = re.search(r"关系\s+([A-Za-z_][\w-]*)\s+指向不存在的元素\s+([A-Za-z0-9_.:-]+)", message)
+            if missing_relation:
+                add({
+                    "kind": "remove_relation",
+                    "element_id": element_id,
+                    "relation_type": missing_relation.group(1),
+                    "target_id": missing_relation.group(2),
+                    "label": f"移除 {element_id} 指向缺失元素的关系",
+                })
+                continue
+
+            disallowed_type = re.search(
+                r"Viewpoint\s+([A-Za-z0-9_.:-]+)\s+does not allow\s+([A-Za-z]+)\s+element\s+([A-Za-z0-9_.:-]+)",
+                message,
+            )
+            if disallowed_type:
+                add({
+                    "kind": "remove_from_view_scope",
+                    "element_id": element_id,
+                    "target_id": disallowed_type.group(3),
+                    "label": f"从 {element_id} 的 View 范围移除不符合 Viewpoint 的元素",
+                })
+                continue
+
+            required_type = re.search(
+                r"Viewpoint\s+([A-Za-z0-9_.:-]+)\s+requires at least one\s+([A-Za-z]+)\s+element",
+                message,
+            )
+            if required_type:
+                viewpoint_id = required_type.group(1)
+                if viewpoint_id in elements:
+                    add({
+                        "kind": "relax_viewpoint_required_type",
+                        "element_id": viewpoint_id,
+                        "required_type": required_type.group(2),
+                        "label": f"放宽 {viewpoint_id} 的必选类型约束",
+                    })
+                continue
+
+            disallowed_relation = re.search(
+                r"does not allow relation\s+([A-Za-z_][\w-]*)\s+from\s+([A-Za-z0-9_.:-]+)\s+to\s+([A-Za-z0-9_.:-]+)",
+                message,
+            )
+            if disallowed_relation:
+                add({
+                    "kind": "remove_relation",
+                    "element_id": disallowed_relation.group(2),
+                    "relation_type": disallowed_relation.group(1),
+                    "target_id": disallowed_relation.group(3),
+                    "label": f"移除 Viewpoint 不允许的关系 {disallowed_relation.group(1)}",
+                })
+
+        return fixes
+
+    def _extract_missing_attribute(self, message: str) -> str:
+        match = re.search(r"attributes\.([A-Za-z_][\w-]*)", message)
+        return match.group(1) if match else ""
+
+    def _default_stereotype(self, element_type: str) -> str:
+        return {
+            "Requirement": "requirement",
+            "Block": "block",
+            "Activity": "activity",
+            "Interface": "interfaceBlock",
+            "Port": "proxyPort",
+            "Constraint": "constraintBlock",
+            "State": "state",
+            "TestCase": "testCase",
+            "View": "view",
+            "Viewpoint": "viewpoint",
+        }.get(element_type, element_type.lower() or "element")
+
+    def _default_attribute_value(self, element_type: str, attribute: str, element: dict[str, Any]) -> str:
+        name = str(element.get("name") or element.get("id") or "该元素")
+        defaults = {
+            "text": f"{name} 的需求说明待工程师确认。",
+            "verification": "Review",
+            "trigger": "TBD",
+            "result": "TBD",
+            "protocol": "TBD",
+            "direction": "inout",
+            "interface": "TBD",
+            "expression": "TBD",
+            "method": "Review",
+            "criterion": "Pass criteria TBD",
+            "purpose": f"{name} 的视角用途待确认。",
+            "allowed_types": [],
+            "required_types": [],
+            "allowed_relations": [],
+        }
+        value = defaults.get(attribute, "TBD")
+        if isinstance(value, list):
+            return ""
+        return value
 
     def _build_chat_prompt(
         self,

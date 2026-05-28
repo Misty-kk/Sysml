@@ -1,4 +1,4 @@
-"""Command-line MDK adapter for Cameo, Jupyter, MATLAB, JSON, and XMI flows."""
+"""Command-line MDK adapter for model sources and verification evidence."""
 
 from __future__ import annotations
 

@@ -291,6 +291,21 @@ export type AiDocumentQualityReview = {
   summary: AiDocgenDraft['summary']
 }
 
+export type AiValidationFixReview = {
+  review: string
+  model: string
+  issue_count: number
+  summary: AiDocgenDraft['summary']
+}
+
+export type AiValidationFixApplyResult = {
+  applied: Array<Record<string, unknown>>
+  skipped: Array<Record<string, unknown>>
+  before: Record<string, unknown>
+  after: Record<string, unknown>
+  validation: ValidationPayload
+}
+
 export type AiChatMessage = {
   role: 'user' | 'assistant'
   content: string
@@ -322,6 +337,9 @@ export type AiChatRetrieval = {
 export type MdkAdapter = {
   id: string
   label: string
+  category?: 'model_source' | 'evidence_source' | string
+  source_kind?: 'model' | 'verification_evidence' | string
+  description?: string
   can_read: boolean
   can_write: boolean
   can_validate: boolean
@@ -439,7 +457,7 @@ export async function api<T>(path: string, options: ApiOptions = {}): Promise<T>
   const headers = new Headers(options.headers)
   headers.set('Content-Type', headers.get('Content-Type') || 'application/json')
   headers.set('X-User', identity?.username || 'engineer')
-  headers.set('X-Role', identity?.role || options.role || 'author')
+  headers.set('X-Role', identity?.role || options.role || 'user')
 
   const token = identity?.token || window.localStorage.getItem(tokenStorageKey)
   if (token) headers.set('Authorization', `Bearer ${token}`)
@@ -509,6 +527,28 @@ export async function copySharedProject(
     {
       ...options,
       method: 'POST',
+      body: JSON.stringify(payload),
+    }
+  )
+}
+
+export async function deleteProject(projectId: string, options: ApiOptions = {}) {
+  return api<{ deleted: string }>(`/api/projects/${encodeURIComponent(projectId)}`, {
+    ...options,
+    method: 'DELETE',
+  })
+}
+
+export async function updateProjectMembers(
+  projectId: string,
+  payload: Pick<ProjectPayload, 'members'>,
+  options: ApiOptions = {}
+) {
+  return api<{ project: Project }>(
+    `/api/projects/${encodeURIComponent(projectId)}/members`,
+    {
+      ...options,
+      method: 'PUT',
       body: JSON.stringify(payload),
     }
   )

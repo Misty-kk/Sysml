@@ -3,6 +3,7 @@
   useEffect,
   lazy,
   useMemo,
+  useRef,
   Suspense,
   useState,
   type DragEvent,
@@ -34,6 +35,7 @@ import {
   type OnNodesChange,
   type OnReconnect,
 } from '@xyflow/react'
+import { useNavigate } from '@tanstack/react-router'
 import {
   AlertCircle,
   Archive,
@@ -42,6 +44,7 @@ import {
   Braces,
   CheckCircle2,
   Code2,
+  Copy,
   Download,
   Edit3,
   FileText,
@@ -62,6 +65,7 @@ import {
   Save,
   Search,
   Send,
+  Share2,
   Sparkles,
   Trash2,
   Upload,
@@ -78,12 +82,17 @@ import {
   type AiDocgenMode,
   type AiChatMessage,
   type AiChatResponse,
-  type AiModelReview,
+  type AiValidationFixApplyResult,
+  type AiValidationFixReview,
   type AiVersionImpact,
   defaultElement,
   loadIdentity,
   login,
   saveIdentity,
+  copySharedProject,
+  deleteProject,
+  publishProject,
+  updateProjectMembers,
   type AuditEvent,
   type Branch,
   type Commit,
@@ -99,7 +108,6 @@ import {
   type Project,
   type Relation,
   type SysmlElement,
-  type Tag,
   type TraceabilityRow,
   type ValidationPayload,
   type ViewPayload,
@@ -134,7 +142,6 @@ import {
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuLabel,
-  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import { Input } from '@/components/ui/input'
@@ -395,8 +402,55 @@ const workspaceNavDetails: Partial<Record<WorkbenchTab, string>> = {
   trace: '检查需求、满足、验证和约束的闭环情况。',
   version: '管理提交、Diff、回滚、标签和分支合并。',
   docgen: '按模型或 View 生成 Markdown、HTML、PDF 文档。',
-  mdk: '导入 Cameo、XMI、JSON、Jupyter、MATLAB 等外部模型。',
+  mdk: '导入结构化模型来源，并接收分析/仿真工具产生的验证证据。',
   assistant: '用 AI 辅助审查模型、追踪关系和文档质量。',
+}
+
+const headerDetails: Partial<Record<WorkbenchTab, { title: string; description: string }>> = {
+  overview: {
+    title: '文档自动生成系统',
+    description: '统一管理项目模型、追踪关系、版本和工程文档',
+  },
+  workspace: {
+    title: '工作区',
+    description: '选择当前项目下的模型、视图、图谱、追踪、版本、文档和工具入口',
+  },
+  projects: {
+    title: '项目管理',
+    description: '管理个人工作台、共享项目和协作成员',
+  },
+  model: {
+    title: '模型管理',
+    description: '管理 SysML 元素、关系和模型属性',
+  },
+  views: {
+    title: '视图管理',
+    description: '配置 View / Viewpoint，收敛图谱和文档范围',
+  },
+  diagram: {
+    title: '关系图谱',
+    description: '查看模型元素之间的连接和追踪网络',
+  },
+  trace: {
+    title: '追踪矩阵',
+    description: '检查需求、满足、验证和约束闭环',
+  },
+  version: {
+    title: '版本管理',
+    description: '管理提交、Diff、回滚、标签和分支合并',
+  },
+  docgen: {
+    title: '文档生成',
+    description: '按模型或视图生成 Markdown、HTML、PDF 和 Word 文档',
+  },
+  mdk: {
+    title: '外部导入',
+    description: '导入模型来源，并接收分析/仿真工具产生的验证证据',
+  },
+  assistant: {
+    title: '智能助手',
+    description: '辅助审查模型、追踪关系和文档质量',
+  },
 }
 
 const moduleWorkbenchTabs = new Set<WorkbenchTab>(
@@ -434,22 +488,28 @@ type SysmlFlowEdge = Edge<SysmlEdgeData, 'smoothstep'> & {
 
 const nodeWidth = 230
 const nodeHeight = 116
+const projectStorageKey = 'sysml-docgen-project'
 
 export function SysmlWorkbench() {
+  const navigate = useNavigate()
   const [identity, setIdentity] = useState<Identity | null>(() => loadIdentity())
   const [loginForm, setLoginForm] = useState({
     username: identity?.username || 'engineer',
     password: 'engineer123',
   })
-  const [role, setRole] = useState(identity?.role || 'author')
+  const [role, setRole] = useState(identity?.role || 'user')
   const [projects, setProjects] = useState<Project[]>([])
   const [projectId, setProjectId] = useState('')
   const [newProject, setNewProject] = useState({
-    id: '',
     name: '',
     organization: '',
     description: '',
+    editorMembers: '',
+    viewerMembers: '',
   })
+  const [memberDrafts, setMemberDrafts] = useState<
+    Record<string, { editorMembers: string; viewerMembers: string }>
+  >({})
   const [branches, setBranches] = useState<Branch[]>([])
   const [branch, setBranch] = useState('main')
   const [metamodel, setMetamodel] = useState<Metamodel | null>(null)
@@ -474,14 +534,12 @@ export function SysmlWorkbench() {
   >({})
   const [traceability, setTraceability] = useState<TraceabilityRow[]>([])
   const [commits, setCommits] = useState<Commit[]>([])
-  const [tags, setTags] = useState<Tag[]>([])
   const [auditEvents, setAuditEvents] = useState<AuditEvent[]>([])
   const [diff, setDiff] = useState<DiffPayload | null>(null)
   const [diffFrom, setDiffFrom] = useState('working')
   const [diffTo, setDiffTo] = useState('working')
   const [rollbackCommit, setRollbackCommit] = useState('')
   const [newBranch, setNewBranch] = useState('')
-  const [newTag, setNewTag] = useState('')
   const [mergeSource, setMergeSource] = useState('')
   const [forceMerge, setForceMerge] = useState(false)
   const [template, setTemplate] = useState(defaultTemplate)
@@ -490,9 +548,12 @@ export function SysmlWorkbench() {
   const [currentDocument, setCurrentDocument] = useState<DocumentRecord | null>(
     null
   )
-  const [aiModelReview, setAiModelReview] = useState<AiModelReview | null>(null)
   const [aiClosureSuggestions, setAiClosureSuggestions] =
     useState<AiClosureSuggestionResponse | null>(null)
+  const [aiValidationFixReview, setAiValidationFixReview] =
+    useState<AiValidationFixReview | null>(null)
+  const [aiValidationFixApplyResult, setAiValidationFixApplyResult] =
+    useState<AiValidationFixApplyResult | null>(null)
   const [aiVersionImpact, setAiVersionImpact] =
     useState<AiVersionImpact | null>(null)
   const [aiDocumentReview, setAiDocumentReview] =
@@ -514,6 +575,7 @@ export function SysmlWorkbench() {
   )
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState('')
+  const workspaceLoadRef = useRef(0)
 
   const project = projects.find((item) => item.id === projectId)
   const types = Object.keys(metamodel?.types || {})
@@ -534,6 +596,7 @@ export function SysmlWorkbench() {
     }),
     [projects]
   )
+  const headerDetail = headerDetails[activeTab] || headerDetails.overview
 
   useEffect(() => {
     bootstrap()
@@ -558,18 +621,9 @@ export function SysmlWorkbench() {
 
   useEffect(() => {
     if (!projectId || !branch) return
-    loadElements()
-  }, [projectId, branch, typeFilter, query])
-
-  useEffect(() => {
-    if (!projectId || !branch) return
-    loadAllElements()
-  }, [projectId, branch])
-
-  useEffect(() => {
-    if (!projectId || !branch) return
-    loadViews()
-  }, [projectId, branch, allElements.length])
+    const requestId = workspaceLoadRef.current
+    void loadModelSnapshot({ requestId })
+  }, [projectId, branch, typeFilter, query, diagramType, selectedViewId])
 
   useEffect(() => {
     if (!selectedElement) return
@@ -578,21 +632,27 @@ export function SysmlWorkbench() {
     setRelationsText(JSON.stringify(selectedElement.relations || [], null, 2))
   }, [selectedElement?.id])
 
-  useEffect(() => {
-    if (!projectId || !branch) return
-    loadDiagram()
-  }, [diagramType, projectId, branch, selectedViewId])
-
-  async function bootstrap() {
+  async function bootstrap(
+    nextIdentity: Identity | null = identity,
+    nextRole: Identity['role'] = role
+  ) {
+    if (!nextIdentity) {
+      resetWorkbenchState()
+      return
+    }
     setLoading(true)
     try {
       const [metamodelPayload, projectsPayload] = await Promise.all([
-        api<Metamodel>('/api/metamodel', { identity, role }),
-        api<{ projects: Project[] }>('/api/projects', { identity, role }),
+        api<Metamodel>('/api/metamodel', { identity: nextIdentity, role: nextRole }),
+        api<{ projects: Project[] }>('/api/projects', { identity: nextIdentity, role: nextRole }),
       ])
       setMetamodel(metamodelPayload)
       setProjects(projectsPayload.projects)
-      selectProject(projectsPayload.projects[0]?.id || '')
+      const preferredProject = pickInitialProject(
+        projectsPayload.projects,
+        nextIdentity.username
+      )
+      selectProject(preferredProject?.id || '')
     } catch (error) {
       notifyError(error)
     } finally {
@@ -600,7 +660,72 @@ export function SysmlWorkbench() {
     }
   }
 
+  function resetWorkbenchState() {
+    setProjects([])
+    setProjectId('')
+    setBranches([])
+    setBranch('main')
+    setMetamodel(null)
+    setElements([])
+    setAllElements([])
+    setSelectedId('')
+    setTypeFilter('all')
+    setQuery('')
+    setForm(defaultElement('Requirement', null))
+    setAttributesText('{}')
+    setRelationsText('[]')
+    setValidation(null)
+    setDiagramType('requirements')
+    setDiagram(null)
+    setViews([])
+    setSelectedViewId('all')
+    setViewScope(null)
+    setDiagramPositions({})
+    setTraceability([])
+    setCommits([])
+    setAuditEvents([])
+    setDiff(null)
+    setDiffFrom('working')
+    setDiffTo('working')
+    setRollbackCommit('')
+    setNewBranch('')
+    setMergeSource('')
+    setForceMerge(false)
+    setNewProject({
+      name: '',
+      organization: '',
+      description: '',
+      editorMembers: '',
+      viewerMembers: '',
+    })
+    setTemplate(defaultTemplate)
+    setDocViewId('all')
+    setDocuments([])
+    setCurrentDocument(null)
+    setAiClosureSuggestions(null)
+    setAiVersionImpact(null)
+    setAiDocumentReview(null)
+    setMdkAdapters([])
+    setMdkTool('json')
+    setMdkFilename('model.json')
+    setMdkContent(sampleMdkJson)
+    setMdkParseResult(null)
+    setMdkImportJob(null)
+    setMdkCommit(true)
+    setMdkMessage('MDK frontend import')
+    setAssistantQuestion('')
+    setAssistantMessages([])
+    setBusy('')
+    setLoading(false)
+  }
+
   function selectProject(nextProjectId: string) {
+    workspaceLoadRef.current += 1
+    if (nextProjectId) {
+      window.localStorage.setItem(projectStorageKey, nextProjectId)
+    } else {
+      window.localStorage.removeItem(projectStorageKey)
+    }
     setProjectId(nextProjectId)
     setBranch('main')
     setBranches([])
@@ -613,7 +738,6 @@ export function SysmlWorkbench() {
     setDiagram(null)
     setTraceability([])
     setCommits([])
-    setTags([])
     setAuditEvents([])
     setDiff(null)
     setRollbackCommit('')
@@ -624,16 +748,32 @@ export function SysmlWorkbench() {
     startNewElement(types[0] || 'Requirement')
   }
 
-  async function loadProjectBranches(nextProjectId = projectId) {
+  function openProjectWorkspace(nextProjectId: string) {
+    selectProject(nextProjectId)
+    setActiveTab('workspace')
+    if (window.location.hash !== '#workspace') {
+      window.history.replaceState(null, '', '#workspace')
+    }
+  }
+
+  async function loadProjectBranches(
+    nextProjectId = projectId,
+    options: { requestId?: number; preferredBranch?: string } = {}
+  ) {
     if (!nextProjectId) return
+    const requestId = options.requestId ?? workspaceLoadRef.current
+    const preferredBranch = options.preferredBranch ?? branch ?? 'main'
     try {
       const payload = await api<{ branches: Branch[] }>(
         `/api/projects/${encodeURIComponent(nextProjectId)}/branches`,
         { identity, role }
       )
+      if (requestId !== workspaceLoadRef.current) {
+        return
+      }
       setBranches(payload.branches)
-      const nextBranch = payload.branches.some((item) => item.name === branch)
-        ? branch
+      const nextBranch = payload.branches.some((item) => item.name === preferredBranch)
+        ? preferredBranch
         : payload.branches[0]?.name || 'main'
       setBranch(nextBranch)
       setMergeSource(
@@ -646,7 +786,7 @@ export function SysmlWorkbench() {
 
   async function createProject() {
     if (!newProject.name.trim()) {
-      toast.error('请先填写项目名称')
+      toast.error('请先填写共享项目名称')
       return
     }
     setBusy('create-project')
@@ -656,10 +796,13 @@ export function SysmlWorkbench() {
         identity,
         role,
         body: JSON.stringify({
-          id: newProject.id.trim() || undefined,
           name: newProject.name.trim(),
           organization: newProject.organization.trim() || undefined,
           description: newProject.description.trim(),
+          members: buildProjectMembers(
+            newProject.editorMembers,
+            newProject.viewerMembers
+          ),
         }),
       })
       const projectsPayload = await api<{ projects: Project[] }>('/api/projects', {
@@ -668,8 +811,15 @@ export function SysmlWorkbench() {
       })
       setProjects(projectsPayload.projects)
       selectProject(payload.project.id)
-      setNewProject({ id: '', name: '', organization: '', description: '' })
-      toast.success(`项目已创建：${payload.project.name || payload.project.id}`)
+      await loadProjectBranches(payload.project.id)
+      setNewProject({
+        name: '',
+        organization: '',
+        description: '',
+        editorMembers: '',
+        viewerMembers: '',
+      })
+      toast.success(`共享项目已创建：${payload.project.name || payload.project.id}`)
     } catch (error) {
       notifyError(error)
     } finally {
@@ -677,26 +827,232 @@ export function SysmlWorkbench() {
     }
   }
 
-  async function loadElements() {
-    if (!projectId || !branch) return
+  async function publishProjectToLibrary(sourceProjectId = projectId) {
+    const sourceProject = projects.find((item) => item.id === sourceProjectId)
+    if (!sourceProject) return
+    if (sourceProject.visibility === 'shared') {
+      toast.message('当前项目已经在共享库中')
+      return
+    }
+    setBusy(`publish-project:${sourceProjectId}`)
     try {
-      const params = new URLSearchParams()
-      if (typeFilter !== 'all') params.set('type', typeFilter)
-      if (query.trim()) params.set('q', query.trim())
-      const payload = await api<{ elements: SysmlElement[] }>(
-        `/api/projects/${encodeURIComponent(projectId)}/branches/${encodeURIComponent(branch)}/elements?${params}`,
+      const payload = await publishProject(
+        sourceProjectId,
+        {
+          id: `${sourceProject.id}-shared-${Date.now().toString(36)}`,
+          name: `${sourceProject.name || sourceProject.id} 共享版`,
+          organization: sourceProject.organization,
+          description: sourceProject.description,
+          members: sourceProject.members || [],
+        },
         { identity, role }
       )
-      setElements(payload.elements)
-      const nextId = payload.elements.some((item) => item.id === selectedId)
-        ? selectedId
-        : payload.elements[0]?.id || ''
+      const projectsPayload = await api<{ projects: Project[] }>('/api/projects', {
+        identity,
+        role,
+      })
+      setProjects(projectsPayload.projects)
+      selectProject(payload.project.id)
+      await loadProjectBranches(payload.project.id)
+      toast.success(`已发布到共享库：${payload.project.name || payload.project.id}`)
+    } catch (error) {
+      notifyError(error)
+    } finally {
+      setBusy('')
+    }
+  }
+
+  async function copyProjectToWorkspace(sourceProjectId: string) {
+    if (!identity) return
+    setBusy(`copy-project:${sourceProjectId}`)
+    try {
+      const payload = await copySharedProject(
+        sourceProjectId,
+        {
+          id: `${identity.username}-${sourceProjectId}-copy-${Date.now().toString(36)}`,
+          name: `复制自 ${sourceProjectId}`,
+        },
+        { identity, role }
+      )
+      const projectsPayload = await api<{ projects: Project[] }>('/api/projects', {
+        identity,
+        role,
+      })
+      setProjects(projectsPayload.projects)
+      selectProject(payload.project.id)
+      await loadProjectBranches(payload.project.id)
+      toast.success(`已复制到个人工作台：${payload.project.name || payload.project.id}`)
+    } catch (error) {
+      notifyError(error)
+    } finally {
+      setBusy('')
+    }
+  }
+
+  async function deleteProjectFromWorkspace(targetProjectId: string) {
+    const targetProject = projects.find((item) => item.id === targetProjectId)
+    if (!targetProject) return
+    if (targetProject.kind === 'workspace') {
+      toast.error('个人工作台不能删除')
+      return
+    }
+    const confirmed = window.confirm(
+      `确定删除项目「${targetProject.name || targetProject.id}」吗？此操作不能撤销。`
+    )
+    if (!confirmed) return
+    setBusy(`delete-project:${targetProjectId}`)
+    try {
+      await deleteProject(targetProjectId, { identity, role })
+      const projectsPayload = await api<{ projects: Project[] }>('/api/projects', {
+        identity,
+        role,
+      })
+      setProjects(projectsPayload.projects)
+      const nextProject =
+        projectsPayload.projects.find((item) => item.id !== targetProjectId) ||
+        null
+      selectProject(nextProject?.id || '')
+      if (nextProject) await loadProjectBranches(nextProject.id)
+      toast.success(`已删除项目：${targetProject.name || targetProject.id}`)
+    } catch (error) {
+      notifyError(error)
+    } finally {
+      setBusy('')
+    }
+  }
+
+  function memberDraftFor(project: Project) {
+    return (
+      memberDrafts[project.id] || {
+        editorMembers: membersByRole(project, 'editor'),
+        viewerMembers: membersByRole(project, 'viewer'),
+      }
+    )
+  }
+
+  function updateMemberDraft(
+    targetProjectId: string,
+    field: 'editorMembers' | 'viewerMembers',
+    value: string
+  ) {
+    const targetProject = projects.find((item) => item.id === targetProjectId)
+    setMemberDrafts((current) => {
+      const existing =
+        current[targetProjectId] ||
+        (targetProject
+          ? {
+              editorMembers: membersByRole(targetProject, 'editor'),
+              viewerMembers: membersByRole(targetProject, 'viewer'),
+            }
+          : { editorMembers: '', viewerMembers: '' })
+      return {
+        ...current,
+        [targetProjectId]: {
+          ...existing,
+          [field]: value,
+        },
+      }
+    })
+  }
+
+  async function saveProjectMembers(targetProjectId: string) {
+    const targetProject = projects.find((item) => item.id === targetProjectId)
+    if (!targetProject) return
+    const draft = memberDraftFor(targetProject)
+    setBusy(`members-project:${targetProjectId}`)
+    try {
+      await updateProjectMembers(
+        targetProjectId,
+        {
+          members: buildProjectMembers(
+            draft.editorMembers,
+            draft.viewerMembers
+          ),
+        },
+        { identity, role }
+      )
+      const projectsPayload = await api<{ projects: Project[] }>('/api/projects', {
+        identity,
+        role,
+      })
+      setProjects(projectsPayload.projects)
+      setMemberDrafts((current) => {
+        const next = { ...current }
+        delete next[targetProjectId]
+        return next
+      })
+      toast.success(`已更新成员：${targetProject.name || targetProject.id}`)
+    } catch (error) {
+      notifyError(error)
+    } finally {
+      setBusy('')
+    }
+  }
+
+  async function loadModelSnapshot(
+    options: {
+      requestId?: number
+      preferredElementIds?: string[]
+      ignoreFilters?: boolean
+    } = {}
+  ) {
+    if (!projectId || !branch) return
+    const requestId = options.requestId ?? workspaceLoadRef.current
+    const currentProjectId = projectId
+    const currentBranch = branch
+    try {
+      const params = new URLSearchParams()
+      if (!options.ignoreFilters && typeFilter !== 'all') params.set('type', typeFilter)
+      if (!options.ignoreFilters && query.trim()) params.set('q', query.trim())
+      const [
+        filteredPayload,
+        allPayload,
+        validationPayload,
+        diagramPayload,
+      ] = await Promise.all([
+        api<{ elements: SysmlElement[] }>(
+          `/api/projects/${encodeURIComponent(currentProjectId)}/branches/${encodeURIComponent(currentBranch)}/elements?${params}`,
+          { identity, role }
+        ),
+        api<{ elements: SysmlElement[] }>(
+          `/api/projects/${encodeURIComponent(currentProjectId)}/branches/${encodeURIComponent(currentBranch)}/elements`,
+          { identity, role }
+        ),
+        api<ValidationPayload>(
+          `/api/projects/${encodeURIComponent(currentProjectId)}/branches/${encodeURIComponent(currentBranch)}/validate`,
+          { identity, role }
+        ),
+        loadDiagramPayload(currentProjectId, currentBranch),
+      ])
+      if (
+        requestId !== workspaceLoadRef.current ||
+        currentProjectId !== projectId ||
+        currentBranch !== branch
+      ) {
+        return
+      }
+      setElements(filteredPayload.elements)
+      setAllElements(allPayload.elements)
+      setValidation(validationPayload)
+      setDiagram(diagramPayload.diagram)
+      setViewScope(diagramPayload.viewScope)
+      const preferredId = options.preferredElementIds?.find((id) =>
+        filteredPayload.elements.some((item) => item.id === id)
+      )
+      const nextId = preferredId
+        || (filteredPayload.elements.some((item) => item.id === selectedId)
+          ? selectedId
+          : filteredPayload.elements[0]?.id || '')
       setSelectedId(nextId)
       if (!nextId) startNewElement()
-      await Promise.all([loadValidation(), loadDiagram()])
+      void loadViews({ requestId, elements: allPayload.elements })
     } catch (error) {
       notifyError(error)
     }
+  }
+
+  async function loadElements() {
+    await loadModelSnapshot()
   }
 
   async function loadAllElements() {
@@ -712,26 +1068,31 @@ export function SysmlWorkbench() {
     }
   }
 
-  async function loadValidation() {
+  async function loadViews(
+    options: { requestId?: number; elements?: SysmlElement[] } = {}
+  ) {
     if (!projectId || !branch) return
+    const requestId = options.requestId ?? workspaceLoadRef.current
+    const currentProjectId = projectId
+    const currentBranch = branch
     try {
-      const payload = await api<ValidationPayload>(
-        `/api/projects/${encodeURIComponent(projectId)}/branches/${encodeURIComponent(branch)}/validate`,
-        { identity, role }
-      )
-      setValidation(payload)
-    } catch (error) {
-      notifyError(error)
-    }
-  }
-
-  async function loadViews() {
-    if (!projectId || !branch) return
-    try {
-      const payload = await api<{ views: SysmlElement[] }>(
-        `/api/projects/${encodeURIComponent(projectId)}/branches/${encodeURIComponent(branch)}/views`,
-        { identity, role }
-      )
+      const payload = options.elements
+        ? {
+            views: options.elements.filter(
+              (item) => item.type === 'View'
+            ),
+          }
+        : await api<{ views: SysmlElement[] }>(
+            `/api/projects/${encodeURIComponent(currentProjectId)}/branches/${encodeURIComponent(currentBranch)}/views`,
+            { identity, role }
+          )
+      if (
+        requestId !== workspaceLoadRef.current ||
+        currentProjectId !== projectId ||
+        currentBranch !== branch
+      ) {
+        return
+      }
       setViews(payload.views)
       if (
         selectedViewId !== 'all' &&
@@ -751,30 +1112,52 @@ export function SysmlWorkbench() {
     }
   }
 
+  async function loadDiagramPayload(
+    currentProjectId = projectId,
+    currentBranch = branch
+  ) {
+    if (selectedViewId !== 'all') {
+      const [diagramPayload, scopePayload] = await Promise.all([
+        api<{ diagram: DiagramPayload }>(
+          `/api/projects/${encodeURIComponent(currentProjectId)}/branches/${encodeURIComponent(currentBranch)}/views/${encodeURIComponent(selectedViewId)}/diagram`,
+          { identity, role }
+        ),
+        api<ViewPayload>(
+          `/api/projects/${encodeURIComponent(currentProjectId)}/branches/${encodeURIComponent(currentBranch)}/views/${encodeURIComponent(selectedViewId)}`,
+          { identity, role }
+        ),
+      ])
+      return {
+        diagram: diagramPayload.diagram,
+        viewScope: scopePayload,
+      }
+    }
+    const payload = await api<{ diagram: DiagramPayload }>(
+      `/api/projects/${encodeURIComponent(currentProjectId)}/branches/${encodeURIComponent(currentBranch)}/diagram?type=${diagramType}`,
+      { identity, role }
+    )
+    return {
+      diagram: payload.diagram,
+      viewScope: null,
+    }
+  }
+
   async function loadDiagram() {
     if (!projectId || !branch) return
+    const requestId = workspaceLoadRef.current
+    const currentProjectId = projectId
+    const currentBranch = branch
     try {
-      if (selectedViewId !== 'all') {
-        const [diagramPayload, scopePayload] = await Promise.all([
-          api<{ diagram: DiagramPayload }>(
-            `/api/projects/${encodeURIComponent(projectId)}/branches/${encodeURIComponent(branch)}/views/${encodeURIComponent(selectedViewId)}/diagram`,
-            { identity, role }
-          ),
-          api<ViewPayload>(
-            `/api/projects/${encodeURIComponent(projectId)}/branches/${encodeURIComponent(branch)}/views/${encodeURIComponent(selectedViewId)}`,
-            { identity, role }
-          ),
-        ])
-        setDiagram(diagramPayload.diagram)
-        setViewScope(scopePayload)
+      const payload = await loadDiagramPayload(currentProjectId, currentBranch)
+      if (
+        requestId !== workspaceLoadRef.current ||
+        currentProjectId !== projectId ||
+        currentBranch !== branch
+      ) {
         return
       }
-      const payload = await api<{ diagram: DiagramPayload }>(
-        `/api/projects/${encodeURIComponent(projectId)}/branches/${encodeURIComponent(branch)}/diagram?type=${diagramType}`,
-        { identity, role }
-      )
       setDiagram(payload.diagram)
-      setViewScope(null)
+      setViewScope(payload.viewScope)
     } catch (error) {
       notifyError(error)
     }
@@ -800,13 +1183,9 @@ export function SysmlWorkbench() {
     if (!projectId) return
     setBusy('version')
     try {
-      const [commitPayload, tagPayload, auditPayload] = await Promise.all([
+      const [commitPayload, auditPayload] = await Promise.all([
         api<{ commits: Commit[] }>(
           `/api/projects/${encodeURIComponent(projectId)}/commits`,
-          { identity, role }
-        ),
-        api<{ tags: Tag[] }>(
-          `/api/projects/${encodeURIComponent(projectId)}/tags`,
           { identity, role }
         ),
         api<{ events: AuditEvent[] }>(
@@ -815,7 +1194,6 @@ export function SysmlWorkbench() {
         ),
       ])
       setCommits(commitPayload.commits)
-      setTags(tagPayload.tags)
       setAuditEvents(auditPayload.events)
       setRollbackCommit(commitPayload.commits[0]?.id || '')
       setDiffFrom(commitPayload.commits[1]?.id || commitPayload.commits[0]?.id || 'working')
@@ -853,6 +1231,7 @@ export function SysmlWorkbench() {
   }
 
   function preloadTab(tab: WorkbenchTab) {
+    if (tab === 'model') void loadModelSnapshot({ ignoreFilters: true })
     if (tab === 'trace') void loadTraceability()
     if (tab === 'version') void loadVersionData()
     if (tab === 'docgen') void loadDocuments()
@@ -884,8 +1263,9 @@ export function SysmlWorkbench() {
       setIdentity(payload.identity)
       setRole(payload.identity.role)
       saveIdentity(payload.identity)
+      resetWorkbenchState()
       toast.success(`已登录：${payload.identity.display || payload.identity.username}`)
-      await bootstrap()
+      await bootstrap(payload.identity, payload.identity.role)
     } catch (error) {
       notifyError(error)
     } finally {
@@ -894,10 +1274,13 @@ export function SysmlWorkbench() {
   }
 
   function handleLogout() {
+    resetWorkbenchState()
     setIdentity(null)
     saveIdentity(null)
-    setRole('author')
+    setRole('user')
+    setLoginForm({ username: '', password: '' })
     toast.success('已退出登录')
+    navigate({ to: '/sign-in', replace: true })
   }
 
   function startNewElement(type = form.type || 'Requirement') {
@@ -1210,28 +1593,26 @@ export function SysmlWorkbench() {
     }
   }
 
-  async function createTag() {
-    if (!projectId || !newTag.trim()) return
-    const latestCommit = commits[0]?.id
-    if (!latestCommit) {
-      toast.error('Create a commit before tagging this model state')
+  async function deleteCommit(commitId: string) {
+    if (!projectId || !commitId) return
+    if (!window.confirm(`确认删除版本 ${commitId}？这不会删除当前工作区内容。`)) {
       return
     }
-    setBusy('tag')
+    setBusy(`delete-commit-${commitId}`)
     try {
-      await api(`/api/projects/${encodeURIComponent(projectId)}/tags`, {
-        method: 'POST',
-        body: JSON.stringify({
-          name: newTag.trim(),
-          commit: latestCommit,
-          description: `Read-only baseline for ${branch}`,
-        }),
+      await api(`/api/projects/${encodeURIComponent(projectId)}/commits/${encodeURIComponent(commitId)}`, {
+        method: 'DELETE',
         identity,
         role,
       })
-      setNewTag('')
+      if (diffFrom === commitId) setDiffFrom('working')
+      if (diffTo === commitId) setDiffTo('working')
+      if (rollbackCommit === commitId) setRollbackCommit('')
+      setDiff(null)
+      setAiVersionImpact(null)
+      await loadProjectBranches()
       await loadVersionData()
-      toast.success(`Tag ${newTag.trim()} created`)
+      toast.success('版本已删除')
     } catch (error) {
       notifyError(error)
     } finally {
@@ -1346,28 +1727,6 @@ export function SysmlWorkbench() {
     }
   }
 
-  async function runAiModelReview() {
-    if (!projectId || !branch) return
-    setBusy('ai-model-review')
-    try {
-      const result = await api<AiModelReview>(
-        `/api/projects/${encodeURIComponent(projectId)}/branches/${encodeURIComponent(branch)}/ve/ai-review`,
-        {
-          method: 'POST',
-          body: JSON.stringify({ selected_id: selectedId }),
-          identity,
-          role,
-        }
-      )
-      setAiModelReview(result)
-      toast.success('AI model review completed')
-    } catch (error) {
-      notifyError(error)
-    } finally {
-      setBusy('')
-    }
-  }
-
   async function runAiClosureSuggestions() {
     if (!projectId || !branch) return
     setBusy('ai-closure-suggestions')
@@ -1383,6 +1742,64 @@ export function SysmlWorkbench() {
       )
       setAiClosureSuggestions(result)
       toast.success('AI closure suggestions generated')
+    } catch (error) {
+      notifyError(error)
+    } finally {
+      setBusy('')
+    }
+  }
+
+  async function runAiValidationFixReview() {
+    if (!projectId || !branch) return
+    if (!validation?.issues.length) {
+      toast.success('当前没有语义校验问题')
+      return
+    }
+    setBusy('ai-validation-fix')
+    try {
+      const result = await api<AiValidationFixReview>(
+        `/api/projects/${encodeURIComponent(projectId)}/branches/${encodeURIComponent(branch)}/ve/ai-validation-fix`,
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            issues: validation.issues,
+            focus: activeTab === 'views' ? 'view' : 'model',
+          }),
+          identity,
+          role,
+        }
+      )
+      setAiValidationFixReview(result)
+      setAiValidationFixApplyResult(null)
+      toast.success('AI 语义修复建议已生成')
+    } catch (error) {
+      notifyError(error)
+    } finally {
+      setBusy('')
+    }
+  }
+
+  async function applyAiValidationFixes() {
+    if (!projectId || !branch) return
+    if (!validation?.issues.length) {
+      toast.success('当前没有语义校验问题')
+      return
+    }
+    setBusy('ai-validation-apply')
+    try {
+      const result = await api<AiValidationFixApplyResult>(
+        `/api/projects/${encodeURIComponent(projectId)}/branches/${encodeURIComponent(branch)}/ve/ai-validation-fix/apply`,
+        {
+          method: 'POST',
+          body: JSON.stringify({ apply: true }),
+          identity,
+          role,
+        }
+      )
+      setAiValidationFixApplyResult(result)
+      setValidation(result.validation)
+      await Promise.all([loadElements(), loadAllElements(), loadProjectBranches()])
+      toast.success(`已应用 ${result.applied.length} 条语义修复`)
     } catch (error) {
       notifyError(error)
     } finally {
@@ -1544,6 +1961,7 @@ export function SysmlWorkbench() {
     if (!projectId || !branch || !mdkImportJob) return
     setBusy('mdk-apply')
     try {
+      const importedElementIds = mdkImportJob.parsed_model.elements.map((element) => element.id)
       const payload = await api<{
         job: MdkImportJob
         result: { imported: number; mapping_report?: MappingReport }
@@ -1562,8 +1980,14 @@ export function SysmlWorkbench() {
         }
       )
       setMdkImportJob(payload.job)
-      await Promise.all([loadElements(), loadAllElements()])
+      setTypeFilter('all')
+      setQuery('')
+      await loadModelSnapshot({
+        preferredElementIds: importedElementIds,
+        ignoreFilters: true,
+      })
       if (mdkCommit) await loadProjectBranches()
+      selectTab('model')
       toast.success(`已应用导入任务，导入 ${payload.result.imported} 个元素`)
     } catch (error) {
       notifyError(error)
@@ -1608,22 +2032,16 @@ export function SysmlWorkbench() {
     <>
       <Header fixed className='border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/70'>
         <div className='me-auto min-w-0'>
-          <div className='flex items-center gap-2'>
-            <span className='truncate text-sm font-semibold'>
-              MBSE Workspace
-            </span>
-            <Badge variant='outline' className='hidden sm:inline-flex'>
-              Model Management
-            </Badge>
-          </div>
+          <h1 className='truncate text-base font-semibold'>
+            {headerDetail?.title}
+          </h1>
           <p className='mt-0.5 hidden text-xs text-muted-foreground sm:block'>
-            Projects, models, views and documents in one traceable workspace
+            {headerDetail?.description}
           </p>
         </div>
         <IdentityDialog
           identity={identity}
           role={role}
-          setRole={setRole}
           loginForm={loginForm}
           setLoginForm={setLoginForm}
           onLogin={handleLogin}
@@ -1650,11 +2068,11 @@ export function SysmlWorkbench() {
                 <div className='grid gap-6 p-5 lg:grid-cols-[minmax(0,1fr)_360px] lg:items-center lg:p-6'>
                   <div className='min-w-0'>
                     <div className='sysml-eyebrow mb-3 text-xs font-semibold uppercase'>
-                      MBSE Portfolio Workspace
+                      Document Automation System
                     </div>
                     <div className='space-y-3'>
                       <h1 className='max-w-4xl text-3xl font-semibold tracking-tight md:text-4xl'>
-                        MBSE 项目统筹中心
+                        文档自动生成系统
                       </h1>
                       <div className='flex flex-wrap items-center gap-2 text-sm text-muted-foreground'>
                         <Badge variant='outline' className='rounded-full bg-background/70'>
@@ -1717,6 +2135,7 @@ export function SysmlWorkbench() {
                   branches={branches}
                   onSelectBranch={setBranch}
                   onBackToWorkspace={() => selectTab('workspace')}
+                  onOpenProjects={() => selectTab('projects')}
                 />
               ) : null}
 
@@ -1726,7 +2145,7 @@ export function SysmlWorkbench() {
                   currentProject={project}
                   totals={projectTotals}
                   validation={validation}
-                  onSelectProject={selectProject}
+                  onSelectProject={openProjectWorkspace}
                   onOpenWorkspace={() => selectTab('workspace')}
                 />
               </TabsContent>
@@ -1739,6 +2158,7 @@ export function SysmlWorkbench() {
                   validation={validation}
                   currentTab={activeTab}
                   onSelect={selectTab}
+                  onOpenProjects={() => selectTab('projects')}
                 />
               </TabsContent>
 
@@ -1746,11 +2166,18 @@ export function SysmlWorkbench() {
                 <ProjectsTab
                   projects={projects}
                   currentProjectId={projectId}
+                  currentUsername={identity?.username || ''}
                   newProject={newProject}
                   setNewProject={setNewProject}
-                  onSelectProject={selectProject}
+                  onSelectProject={openProjectWorkspace}
                   onOpenWorkspace={() => selectTab('workspace')}
                   onCreateProject={createProject}
+                  onPublishProject={publishProjectToLibrary}
+                  onCopyProject={copyProjectToWorkspace}
+                  onDeleteProject={deleteProjectFromWorkspace}
+                  memberDraftFor={memberDraftFor}
+                  onUpdateMemberDraft={updateMemberDraft}
+                  onSaveMembers={saveProjectMembers}
                   busy={busy}
                 />
               </TabsContent>
@@ -1773,20 +2200,22 @@ export function SysmlWorkbench() {
                   relationsText={relationsText}
                   setRelationsText={setRelationsText}
                   validation={validation}
-                  aiReview={aiModelReview}
                   aiClosureSuggestions={aiClosureSuggestions}
+                  aiValidationFixReview={aiValidationFixReview}
+                  aiValidationFixApplyResult={aiValidationFixApplyResult}
                   onNew={() => startNewElement(types[0] || 'Requirement')}
                   onDelete={deleteElement}
                   onSave={saveElement}
                   onAddRelation={addRelation}
-                  onAiReview={runAiModelReview}
                   onAiClosureSuggestions={runAiClosureSuggestions}
+                  onAiValidationFixReview={runAiValidationFixReview}
+                  onApplyAiValidationFixes={applyAiValidationFixes}
                   busy={busy}
                 />
               </TabsContent>
 
               <TabsContent value='views'>
-              <ViewsTab
+                <ViewsTab
                   views={views.length ? views : viewElements}
                   viewpoints={viewpointElements}
                   selectedId={selectedId}
@@ -1801,10 +2230,13 @@ export function SysmlWorkbench() {
                   onUpdateViewAttributes={updateViewAttributes}
                   onUpdateViewQuery={updateViewQuery}
                   onSaveCurrent={saveCurrentElement}
+                  onDeleteCurrent={deleteElement}
                   validation={validation}
-                  aiReview={aiModelReview}
+                  aiValidationFixReview={aiValidationFixReview}
+                  aiValidationFixApplyResult={aiValidationFixApplyResult}
                   busy={busy}
-                  onAiReview={runAiModelReview}
+                  onAiValidationFixReview={runAiValidationFixReview}
+                  onApplyAiValidationFixes={applyAiValidationFixes}
                 />
               </TabsContent>
 
@@ -1844,7 +2276,6 @@ export function SysmlWorkbench() {
                   validation={validation}
                   branches={branches}
                   commits={commits}
-                  tags={tags}
                   auditEvents={auditEvents}
                   diff={diff}
                   aiImpact={aiVersionImpact}
@@ -1856,8 +2287,6 @@ export function SysmlWorkbench() {
                   setRollbackCommit={setRollbackCommit}
                   newBranch={newBranch}
                   setNewBranch={setNewBranch}
-                  newTag={newTag}
-                  setNewTag={setNewTag}
                   mergeSource={mergeSource}
                   setMergeSource={setMergeSource}
                   forceMerge={forceMerge}
@@ -1869,7 +2298,7 @@ export function SysmlWorkbench() {
                   onAiImpact={runAiVersionImpact}
                   onRollback={rollback}
                   onCreateBranch={createBranch}
-                  onCreateTag={createTag}
+                  onDeleteCommit={deleteCommit}
                   onMerge={mergeBranch}
                   busy={busy}
                 />
@@ -1956,14 +2385,16 @@ type ModelTabProps = {
   relationsText: string
   setRelationsText: (value: string) => void
   validation: ValidationPayload | null
-  aiReview: AiModelReview | null
   aiClosureSuggestions: AiClosureSuggestionResponse | null
+  aiValidationFixReview: AiValidationFixReview | null
+  aiValidationFixApplyResult: AiValidationFixApplyResult | null
   onNew: () => void
   onDelete: () => void
   onSave: (event: FormEvent) => void
   onAddRelation: () => void
-  onAiReview: () => void
   onAiClosureSuggestions: () => void
+  onAiValidationFixReview: () => void
+  onApplyAiValidationFixes: () => void
   busy: string
 }
 
@@ -1974,6 +2405,7 @@ function WorkspaceTab({
   validation,
   currentTab,
   onSelect,
+  onOpenProjects,
 }: {
   project: Project | null
   branch: string
@@ -1988,6 +2420,7 @@ function WorkspaceTab({
   validation: ValidationPayload | null
   currentTab: WorkbenchTab
   onSelect: (tab: WorkbenchTab) => void
+  onOpenProjects: () => void
 }) {
   const issueCount =
     (validation?.summary.errors || 0) + (validation?.summary.warnings || 0)
@@ -1998,7 +2431,7 @@ function WorkspaceTab({
         <div className='flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between'>
           <div>
             <p className='text-xs font-semibold uppercase tracking-wide text-primary'>
-              MBSE Workspace
+              文档工作区
             </p>
             <h2 className='text-2xl font-semibold'>选择你要进入的工作区</h2>
             <p className='mt-1 text-sm text-muted-foreground'>
@@ -2082,12 +2515,36 @@ function WorkspaceTab({
           </div>
         </section>
 
+        <section className='sysml-card p-5'>
+          <div className='flex items-start gap-3'>
+            <div className='flex size-10 shrink-0 items-center justify-center rounded-2xl bg-primary/10 text-primary'>
+              <Share2 className='size-5' />
+            </div>
+            <div className='min-w-0'>
+              <p className='text-sm font-semibold'>共享协作</p>
+              <p className='mt-1 text-sm text-muted-foreground'>
+                通过项目成员决定谁能共同编辑；owner / editor 可写，viewer 只读。
+              </p>
+            </div>
+          </div>
+          <div className='mt-4 flex flex-wrap gap-2'>
+            <Button size='sm' onClick={onOpenProjects}>
+              <Boxes className='size-4' />
+              项目管理
+            </Button>
+            <Button size='sm' variant='outline' onClick={onOpenProjects}>
+              <Copy className='size-4' />
+              共享库
+            </Button>
+          </div>
+        </section>
+
         <section className='rounded-3xl bg-muted/35 p-5'>
           <p className='text-sm font-semibold'>建议下一步</p>
           <div className='mt-3 space-y-3 text-sm text-muted-foreground'>
             <p>如果是新项目，先进入“模型”创建基础元素，或进入“外部导入”上传已有模型。</p>
             <p>如果要给别人看结果，先进入“视图”圈定范围，再到“文档”生成输出。</p>
-            <p>如果准备冻结状态，进入“版本”提交并创建标签基线。</p>
+            <p>如果需要保留可追溯版本，进入“版本”提交当前状态。</p>
           </div>
         </section>
       </aside>
@@ -2120,6 +2577,7 @@ function ProjectContextBar({
   branches,
   onSelectBranch,
   onBackToWorkspace,
+  onOpenProjects,
 }: {
   activeTab: WorkbenchTab
   project: Project | null
@@ -2127,10 +2585,15 @@ function ProjectContextBar({
   branches: Branch[]
   onSelectBranch: (branch: string) => void
   onBackToWorkspace: () => void
+  onOpenProjects: () => void
 }) {
   const activeModule = secondaryWorkbenchNav.find((item) => item.value === activeTab)
   const Icon = activeModule?.icon || Boxes
   const isModulePage = moduleWorkbenchTabs.has(activeTab)
+  const branchOptions = branches.length
+    ? branches
+    : [{ name: branch || 'main', head: '', elements: 0, documents: 0 }]
+  const selectedBranch = branch || branchOptions[0]?.name || 'main'
 
   return (
     <div className='flex flex-col gap-3 rounded-3xl bg-muted/25 p-3 sm:flex-row sm:items-center sm:justify-between'>
@@ -2173,12 +2636,21 @@ function ProjectContextBar({
             返回工作区
           </Button>
         ) : null}
-        <Select value={branch} onValueChange={onSelectBranch}>
+        <Button
+          variant='outline'
+          size='sm'
+          className='rounded-xl bg-background'
+          onClick={onOpenProjects}
+        >
+          <Share2 className='size-4' />
+          共享协作
+        </Button>
+        <Select value={selectedBranch} onValueChange={onSelectBranch}>
           <SelectTrigger className='h-9 w-[150px] rounded-xl bg-background'>
-            <SelectValue placeholder='选择分支' />
+            <SelectValue placeholder='main' />
           </SelectTrigger>
           <SelectContent>
-            {branches.map((item) => (
+            {branchOptions.map((item) => (
               <SelectItem key={item.name} value={item.name}>
                 {item.name}
               </SelectItem>
@@ -2193,7 +2665,6 @@ function ProjectContextBar({
 function IdentityDialog({
   identity,
   role,
-  setRole,
   loginForm,
   setLoginForm,
   onLogin,
@@ -2202,7 +2673,6 @@ function IdentityDialog({
 }: {
   identity: Identity | null
   role: Identity['role']
-  setRole: (role: Identity['role']) => void
   loginForm: { username: string; password: string }
   setLoginForm: React.Dispatch<
     React.SetStateAction<{ username: string; password: string }>
@@ -2270,23 +2740,6 @@ function IdentityDialog({
             />
           </Field>
         </div>
-        <Field label='Request role'>
-          <Select
-            value={role}
-            onValueChange={(value) =>
-              setRole(value as 'admin' | 'author' | 'reader')
-            }
-          >
-            <SelectTrigger className='w-full'>
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value='author'>author</SelectItem>
-              <SelectItem value='reader'>reader</SelectItem>
-              <SelectItem value='admin'>admin</SelectItem>
-            </SelectContent>
-          </Select>
-        </Field>
         <div className='flex flex-wrap justify-end gap-2'>
           <Button variant='outline' onClick={onLogout}>
             <LogOut className='size-4' />
@@ -2560,11 +3013,22 @@ function ModelTab(props: ModelTabProps) {
                   )}
                   保存元素
                 </Button>
+                <Button
+                  type='button'
+                  variant='destructive'
+                  size='sm'
+                  disabled={!props.form.id || props.busy === 'delete-element'}
+                  onClick={props.onDelete}
+                >
+                  {props.busy === 'delete-element' ? (
+                    <Loader2 className='size-4 animate-spin' />
+                  ) : (
+                    <Trash2 className='size-4' />
+                  )}
+                  删除元素
+                </Button>
                 <ModelActionsMenu
-                  canDelete={Boolean(props.form.id)}
-                  busy={props.busy}
                   onAddRelation={props.onAddRelation}
-                  onDelete={props.onDelete}
                   attributesText={props.attributesText}
                   relationsText={props.relationsText}
                   setAttributesText={props.setAttributesText}
@@ -2694,12 +3158,17 @@ function ModelTab(props: ModelTabProps) {
           </CardContent>
         </Card>
 
-        <ValidationPanel validation={props.validation} />
-        <AiModelReviewPanel
-          review={props.aiReview}
+        <ValidationPanel
+          validation={props.validation}
+          aiFixReview={props.aiValidationFixReview}
+          applyResult={props.aiValidationFixApplyResult}
+          busy={props.busy}
+          onAiFix={props.onAiValidationFixReview}
+          onApplyFixes={props.onApplyAiValidationFixes}
+        />
+        <ClosureSuggestionsPanel
           closureSuggestions={props.aiClosureSuggestions}
           busy={props.busy}
-          onReview={props.onAiReview}
           onClosureSuggestions={props.onAiClosureSuggestions}
         />
 
@@ -2856,19 +3325,13 @@ function LocalMetric({
 }
 
 function ModelActionsMenu({
-  canDelete,
-  busy,
   onAddRelation,
-  onDelete,
   attributesText,
   relationsText,
   setAttributesText,
   setRelationsText,
 }: {
-  canDelete: boolean
-  busy: string
   onAddRelation: () => void
-  onDelete: () => void
   attributesText: string
   relationsText: string
   setAttributesText: (value: string) => void
@@ -2899,15 +3362,6 @@ function ModelActionsMenu({
           >
             <Code2 className='size-4' />
             编辑 JSON
-          </DropdownMenuItem>
-          <DropdownMenuSeparator />
-          <DropdownMenuItem
-            variant='destructive'
-            disabled={!canDelete || busy === 'delete-element'}
-            onClick={onDelete}
-          >
-            <Trash2 className='size-4' />
-            删除元素
           </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
@@ -3307,11 +3761,27 @@ function typeBadgeClass(type: string) {
   return 'border-slate-300 bg-slate-50 text-slate-700 dark:border-slate-800 dark:bg-slate-950 dark:text-slate-300'
 }
 
-function ValidationPanel({ validation }: { validation: ValidationPayload | null }) {
+function ValidationPanel({
+  validation,
+  aiFixReview,
+  applyResult,
+  busy,
+  onAiFix,
+  onApplyFixes,
+}: {
+  validation: ValidationPayload | null
+  aiFixReview: AiValidationFixReview | null
+  applyResult: AiValidationFixApplyResult | null
+  busy: string
+  onAiFix: () => void
+  onApplyFixes: () => void
+}) {
   if (!validation) return null
   const visibleIssues = validation.issues.slice(0, 3)
   const hiddenIssues = validation.issues.slice(3)
   const hasErrors = validation.summary.errors > 0
+  const fixing = busy === 'ai-validation-fix'
+  const applying = busy === 'ai-validation-apply'
 
   return (
     <Card className='sysml-card overflow-hidden'>
@@ -3324,11 +3794,44 @@ function ValidationPanel({ validation }: { validation: ValidationPayload | null 
               {validation.summary.warnings} 个警告
             </CardDescription>
           </div>
-          <Badge
-            variant={validation.summary.errors ? 'destructive' : 'secondary'}
-          >
-            {validation.summary.errors ? '需处理' : '可发布'}
-          </Badge>
+          <div className='flex flex-wrap items-center justify-end gap-2'>
+            {validation.issues.length ? (
+              <Button
+                type='button'
+                size='sm'
+                variant='outline'
+                onClick={onAiFix}
+                disabled={fixing}
+              >
+                {fixing ? (
+                  <Loader2 className='size-4 animate-spin' />
+                ) : (
+                  <Sparkles className='size-4' />
+                )}
+                AI 修复建议
+              </Button>
+            ) : null}
+            {validation.issues.length ? (
+              <Button
+                type='button'
+                size='sm'
+                onClick={onApplyFixes}
+                disabled={applying}
+              >
+                {applying ? (
+                  <Loader2 className='size-4 animate-spin' />
+                ) : (
+                  <Wrench className='size-4' />
+                )}
+                一键应用
+              </Button>
+            ) : null}
+            <Badge
+              variant={validation.summary.errors ? 'destructive' : 'secondary'}
+            >
+              {validation.summary.errors ? '需处理' : '可发布'}
+            </Badge>
+          </div>
         </div>
       </CardHeader>
       <CardContent className='space-y-3'>
@@ -3351,15 +3854,6 @@ function ValidationPanel({ validation }: { validation: ValidationPayload | null 
               ) : null}
             </div>
 
-            <div className='divide-y rounded-2xl bg-muted/25'>
-              {visibleIssues.map((issue, index) => (
-                <ValidationIssueRow
-                  key={`${issue.element_id}-${index}`}
-                  issue={issue}
-                />
-              ))}
-            </div>
-
             {hiddenIssues.length ? (
               <Collapsible>
                 <CollapsibleTrigger asChild>
@@ -3368,7 +3862,7 @@ function ValidationPanel({ validation }: { validation: ValidationPayload | null 
                   </Button>
                 </CollapsibleTrigger>
                 <CollapsibleContent>
-                  <div className='mt-2 max-h-72 overflow-auto rounded-2xl bg-muted/20'>
+                  <div className='mb-3 max-h-72 overflow-auto rounded-2xl bg-muted/20'>
                     {hiddenIssues.map((issue, index) => (
                       <ValidationIssueRow
                         key={`${issue.element_id}-hidden-${index}`}
@@ -3379,6 +3873,15 @@ function ValidationPanel({ validation }: { validation: ValidationPayload | null 
                 </CollapsibleContent>
               </Collapsible>
             ) : null}
+
+            <div className='divide-y rounded-2xl bg-muted/25'>
+              {visibleIssues.map((issue, index) => (
+                <ValidationIssueRow
+                  key={`${issue.element_id}-${index}`}
+                  issue={issue}
+                />
+              ))}
+            </div>
           </>
         ) : (
           <div className='flex items-center gap-2 text-sm text-muted-foreground'>
@@ -3386,6 +3889,42 @@ function ValidationPanel({ validation }: { validation: ValidationPayload | null 
             未发现校验问题
           </div>
         )}
+        {applying ? (
+          <div className='flex items-center gap-2 rounded-xl border bg-muted/20 p-3 text-sm text-muted-foreground'>
+            <Loader2 className='size-4 animate-spin' />
+            正在应用语义修复
+          </div>
+        ) : applyResult ? (
+          <div className='rounded-xl border bg-emerald-50 p-4 text-sm text-emerald-950 dark:bg-emerald-950/25 dark:text-emerald-100'>
+            <div className='flex flex-wrap items-center justify-between gap-2'>
+              <div className='font-semibold'>语义修复已应用</div>
+              <Badge variant='secondary'>{applyResult.applied.length} applied</Badge>
+            </div>
+            <div className='mt-2 text-xs'>
+              修复前：{String(applyResult.before.errors ?? 0)} 错误 / {String(applyResult.before.warnings ?? 0)} 警告；
+              修复后：{String(applyResult.after.errors ?? 0)} 错误 / {String(applyResult.after.warnings ?? 0)} 警告
+            </div>
+            {applyResult.skipped.length ? (
+              <div className='mt-2 text-xs'>
+                {applyResult.skipped.length} 条未自动处理，建议人工确认。
+              </div>
+            ) : null}
+          </div>
+        ) : null}
+        {fixing ? (
+          <div className='flex items-center gap-2 rounded-xl border bg-muted/20 p-3 text-sm text-muted-foreground'>
+            <Loader2 className='size-4 animate-spin' />
+            正在分析语义问题并生成修复建议
+          </div>
+        ) : aiFixReview ? (
+          <div className='rounded-xl border bg-muted/20 p-4'>
+            <div className='mb-3 flex items-center justify-between gap-2'>
+              <div className='text-sm font-semibold'>AI 语义校验修复建议</div>
+              <Badge variant='secondary'>{aiFixReview.issue_count} issues</Badge>
+            </div>
+            <MarkdownMessage content={aiFixReview.review} compact />
+          </div>
+        ) : null}
       </CardContent>
     </Card>
   )
@@ -3546,7 +4085,7 @@ function OverviewTab({
           <div className='space-y-2 text-sm text-muted-foreground'>
             <p>新项目：进入“项目管理”创建项目，再到工作区选择“外部导入”或“模型”。</p>
             <p>要汇报：进入“视图”圈定范围，再生成“文档”。</p>
-            <p>要冻结：进入“版本”提交并创建标签基线。</p>
+            <p>要保留历史：进入“版本”提交当前状态。</p>
           </div>
         </CardContent>
       </Card>
@@ -3557,30 +4096,53 @@ function OverviewTab({
 function ProjectsTab({
   projects,
   currentProjectId,
+  currentUsername,
   newProject,
   setNewProject,
   onSelectProject,
   onOpenWorkspace,
   onCreateProject,
+  onPublishProject,
+  onCopyProject,
+  onDeleteProject,
+  memberDraftFor,
+  onUpdateMemberDraft,
+  onSaveMembers,
   busy,
 }: {
   projects: Project[]
   currentProjectId: string
+  currentUsername: string
   newProject: {
-    id: string
     name: string
     organization: string
     description: string
+    editorMembers: string
+    viewerMembers: string
   }
   setNewProject: (value: {
-    id: string
     name: string
     organization: string
     description: string
+    editorMembers: string
+    viewerMembers: string
   }) => void
   onSelectProject: (projectId: string) => void
   onOpenWorkspace: () => void
   onCreateProject: () => void
+  onPublishProject: (projectId: string) => void
+  onCopyProject: (projectId: string) => void
+  onDeleteProject: (projectId: string) => void
+  memberDraftFor: (project: Project) => {
+    editorMembers: string
+    viewerMembers: string
+  }
+  onUpdateMemberDraft: (
+    projectId: string,
+    field: 'editorMembers' | 'viewerMembers',
+    value: string
+  ) => void
+  onSaveMembers: (projectId: string) => void
   busy: string
 }) {
   const totalElements = projects.reduce((sum, project) => sum + (project.elements || 0), 0)
@@ -3614,14 +4176,14 @@ function ProjectsTab({
                 <DialogTrigger asChild>
                   <Button size='sm'>
                     <Plus className='size-4' />
-                    新建项目
+                    新建共享项目
                   </Button>
                 </DialogTrigger>
                 <DialogContent className='sm:max-w-xl'>
                   <DialogHeader>
-                    <DialogTitle>新建项目</DialogTitle>
+                    <DialogTitle>新建共享项目</DialogTitle>
                     <DialogDescription>
-                      创建后会自动拥有独立的 main 分支、提交记录和后续文档空间。
+                      创建后进入共享库；默认只有你自己，也可以填写协作成员。
                     </DialogDescription>
                   </DialogHeader>
                   <div className='grid gap-4'>
@@ -3634,15 +4196,29 @@ function ProjectsTab({
                         placeholder='例如：火星探测器电源系统'
                       />
                     </Field>
-                    <Field label='项目 ID'>
-                      <Input
-                        value={newProject.id}
-                        onChange={(event) =>
-                          updateNewProject('id', event.target.value)
-                        }
-                        placeholder='留空则自动根据名称生成'
-                      />
-                    </Field>
+                    <div className='grid gap-3 sm:grid-cols-2'>
+                      <Field label='editor：'>
+                        <Input
+                          value={newProject.editorMembers}
+                          onChange={(event) =>
+                            updateNewProject('editorMembers', event.target.value)
+                          }
+                          placeholder='例如：teacher1, engineer'
+                        />
+                      </Field>
+                      <Field label='viewer：'>
+                        <Input
+                          value={newProject.viewerMembers}
+                          onChange={(event) =>
+                            updateNewProject('viewerMembers', event.target.value)
+                          }
+                          placeholder='例如：reviewer'
+                        />
+                      </Field>
+                    </div>
+                    <p className='-mt-2 text-xs text-muted-foreground'>
+                      多个用户名用逗号分隔；editor 可共同编辑，viewer 只能查看。
+                    </p>
                     <Field label='组织 / 团队'>
                       <Input
                         value={newProject.organization}
@@ -3671,7 +4247,7 @@ function ProjectsTab({
                       ) : (
                         <Plus className='size-4' />
                       )}
-                      创建并打开项目
+                      创建共享项目
                     </Button>
                     <div className='rounded-2xl bg-muted/30 p-3 text-xs text-muted-foreground'>
                       新项目是空模型。后续可以在 Model 手动建元素，或到 MDK 上传 JSON/XMI/MATLAB/Jupyter 文件导入。
@@ -3687,6 +4263,11 @@ function ProjectsTab({
             <div className='grid gap-3 lg:grid-cols-2'>
               {projects.map((project) => {
                 const active = project.id === currentProjectId
+                const canManageMembers =
+                  project.kind !== 'workspace' && project.owner === currentUsername
+                const canDelete =
+                  project.kind !== 'workspace' && project.owner === currentUsername
+                const memberDraft = memberDraftFor(project)
                 return (
                   <button
                     key={project.id}
@@ -3717,6 +4298,39 @@ function ProjectsTab({
                         <p className='mt-1 line-clamp-2 text-sm text-muted-foreground'>
                           {project.description || 'No description yet'}
                         </p>
+                        <div className='mt-2 flex flex-wrap gap-2'>
+                          <Badge variant={project.visibility === 'shared' ? 'default' : 'secondary'}>
+                            {project.visibility === 'shared'
+                              ? '共享库'
+                              : project.kind === 'workspace'
+                                ? '个人工作台'
+                                : '个人副本'}
+                          </Badge>
+                          {project.owner ? (
+                            <Badge variant='outline'>owner: {project.owner}</Badge>
+                          ) : null}
+                          {project.member_count ? (
+                            <Badge variant='outline'>{project.member_count} members</Badge>
+                          ) : null}
+                        </div>
+                        {project.members?.length ? (
+                          <div className='mt-3 flex flex-wrap gap-1.5'>
+                            {project.members.slice(0, 4).map((member) => (
+                              <Badge
+                                key={`${project.id}-${member.username}-${member.role}`}
+                                variant={member.role === 'viewer' ? 'secondary' : 'outline'}
+                                className='rounded-full'
+                              >
+                                {member.username}: {member.role}
+                              </Badge>
+                            ))}
+                            {project.members.length > 4 ? (
+                              <Badge variant='secondary' className='rounded-full'>
+                                +{project.members.length - 4}
+                              </Badge>
+                            ) : null}
+                          </div>
+                        ) : null}
                       </div>
                       <Badge variant={active ? 'default' : 'secondary'}>
                         {active ? '当前项目' : '打开项目'}
@@ -3731,6 +4345,132 @@ function ProjectsTab({
                     <div className='mt-3 text-xs text-muted-foreground'>
                       {project.organization || 'No organization'} / updated{' '}
                       {project.updated_at || '-'}
+                    </div>
+                    <div className='mt-3 flex flex-wrap gap-2'>
+                      {project.visibility === 'shared' ? (
+                        <Button
+                          type='button'
+                          size='sm'
+                          variant='outline'
+                          onClick={(event) => {
+                            event.stopPropagation()
+                            onCopyProject(project.id)
+                          }}
+                          disabled={busy === `copy-project:${project.id}`}
+                        >
+                          {busy === `copy-project:${project.id}` ? (
+                            <Loader2 className='size-4 animate-spin' />
+                          ) : (
+                            <Copy className='size-4' />
+                          )}
+                          复制到我的工作台
+                        </Button>
+                      ) : (
+                        <Button
+                          type='button'
+                          size='sm'
+                          variant='outline'
+                          onClick={(event) => {
+                            event.stopPropagation()
+                            onPublishProject(project.id)
+                          }}
+                          disabled={busy === `publish-project:${project.id}`}
+                        >
+                          {busy === `publish-project:${project.id}` ? (
+                            <Loader2 className='size-4 animate-spin' />
+                          ) : (
+                            <Share2 className='size-4' />
+                          )}
+                          发布到共享库
+                        </Button>
+                      )}
+                      {canManageMembers ? (
+                        <Dialog>
+                          <DialogTrigger asChild>
+                            <Button
+                              type='button'
+                              size='sm'
+                              variant='outline'
+                              onClick={(event) => event.stopPropagation()}
+                            >
+                              <UserCircle className='size-4' />
+                              成员管理
+                            </Button>
+                          </DialogTrigger>
+                          <DialogContent
+                            className='sm:max-w-lg'
+                            onClick={(event) => event.stopPropagation()}
+                          >
+                            <DialogHeader>
+                              <DialogTitle>成员管理</DialogTitle>
+                              <DialogDescription>
+                                调整 {project.name || project.id} 的 editor 和 viewer。
+                              </DialogDescription>
+                            </DialogHeader>
+                            <div className='grid gap-4'>
+                              <Field label='editor：'>
+                                <Input
+                                  value={memberDraft.editorMembers}
+                                  onChange={(event) =>
+                                    onUpdateMemberDraft(
+                                      project.id,
+                                      'editorMembers',
+                                      event.target.value
+                                    )
+                                  }
+                                  placeholder='例如：teacher1, engineer'
+                                />
+                              </Field>
+                              <Field label='viewer：'>
+                                <Input
+                                  value={memberDraft.viewerMembers}
+                                  onChange={(event) =>
+                                    onUpdateMemberDraft(
+                                      project.id,
+                                      'viewerMembers',
+                                      event.target.value
+                                    )
+                                  }
+                                  placeholder='例如：reviewer'
+                                />
+                              </Field>
+                              <p className='text-xs text-muted-foreground'>
+                                owner 会自动保留；不存在的用户名会被拒绝保存。
+                              </p>
+                              <Button
+                                onClick={() => onSaveMembers(project.id)}
+                                disabled={busy === `members-project:${project.id}`}
+                              >
+                                {busy === `members-project:${project.id}` ? (
+                                  <Loader2 className='size-4 animate-spin' />
+                                ) : (
+                                  <Save className='size-4' />
+                                )}
+                                保存成员
+                              </Button>
+                            </div>
+                          </DialogContent>
+                        </Dialog>
+                      ) : null}
+                      {canDelete ? (
+                        <Button
+                          type='button'
+                          size='sm'
+                          variant='destructive'
+                          onClick={(event) => {
+                            event.stopPropagation()
+                            onDeleteProject(project.id)
+                          }}
+                          disabled={busy === `delete-project:${project.id}`}
+                        >
+                          {busy === `delete-project:${project.id}` ? (
+                            <Loader2 className='size-4 animate-spin' />
+                          ) : (
+                            <Trash2 className='size-4' />
+                          )}
+                          删除工作台
+                        </Button>
+                      ) : null}
                     </div>
                   </button>
                 )
@@ -3781,11 +4521,7 @@ function ViewDefinitionPanel({
       ? (attributes.query as Record<string, unknown>)
       : {}
   const selectedTypes = stringList(query.types)
-  const selectedOwners = stringList(query.owners)
   const selectedRelations = stringList(query.relations)
-  const ownerOptions = Array.from(
-    new Set(elements.map((element) => element.owner || '').filter(Boolean))
-  ).sort()
   const elementById = useMemo(
     () => new Map(elements.map((element) => [element.id, element])),
     [elements]
@@ -3817,9 +4553,6 @@ function ViewDefinitionPanel({
     ...queryPreview.matches.filter((element) => !includedSet.has(element.id)),
   ]
   const finalSet = new Set(finalPreviewElements.map((element) => element.id))
-  const overlapCount = queryPreview.matches.filter((element) =>
-    includedSet.has(element.id)
-  ).length
   const candidates = elements.filter(
     (element) =>
       element.id !== viewId && element.type !== 'View' && element.type !== 'Viewpoint'
@@ -3834,8 +4567,7 @@ function ViewDefinitionPanel({
     {}
   )
   const orderedTypes = Object.keys(grouped).sort()
-  const [showQueryEditor, setShowQueryEditor] = useState(false)
-  const [showLibrary, setShowLibrary] = useState(true)
+  const [showLibrary, setShowLibrary] = useState(false)
   const scopeIssues = useMemo(() => {
     const issues: Array<{
       source: SysmlElement
@@ -3957,7 +4689,7 @@ function ViewDefinitionPanel({
         </div>
       </CardHeader>
       <CardContent className='space-y-4'>
-        <div className='grid gap-4 lg:grid-cols-2'>
+        <div>
           <Field label='Viewpoint'>
             <Select
               value={String(attributes.viewpoint_id || 'none')}
@@ -3987,41 +4719,14 @@ function ViewDefinitionPanel({
               </p>
             )}
           </Field>
-          <Field label='Document section title'>
-            <Input
-              value={String(attributes.doc_section_title || '')}
-              onChange={(event) =>
-                onUpdateAttributes({ doc_section_title: event.target.value })
-              }
-              placeholder='例如：电源需求审查'
-            />
-          </Field>
         </div>
 
-        <div className='grid gap-4 xl:grid-cols-[minmax(0,1.2fr)_minmax(320px,0.8fr)]'>
+        <div className='grid gap-4 xl:grid-cols-[minmax(260px,0.56fr)_minmax(0,1.44fr)]'>
           <div className='space-y-4'>
-            <div className='grid gap-4 xl:grid-cols-2'>
-              <QueryPreviewCard
-                title='手动绑定'
-                note='这个 View 里被你手动挑进来的元素。'
-                elements={elements}
-                explicitElements={selectedElements}
-                accent
-                emptyLabel='还没有手动绑定元素'
-              />
-              <QueryPreviewCard
-                title='自动命中'
-                note='来自 Viewpoint 默认查询和 View 自己的 query 叠加结果。'
-                query={effectiveQuery}
-                elements={elements}
-                emptyLabel='还没有设置自动查询条件'
-              />
-            </div>
-
             <div className='rounded-md border bg-background p-4'>
               <div className='mb-3 flex items-center justify-between gap-3'>
                 <div>
-                  <div className='text-sm font-semibold'>结果预览</div>
+                  <div className='text-sm font-semibold'>最终范围</div>
                   <p className='text-xs text-muted-foreground'>
                     这是 Graph 和 Docs 最终会用到的范围。
                   </p>
@@ -4032,27 +4737,20 @@ function ViewDefinitionPanel({
                     : '无 Viewpoint'}
                 </Badge>
               </div>
-              <div className='grid gap-3 sm:grid-cols-4'>
-                <div className='rounded-md bg-muted/30 p-3'>
-                  <div className='text-xs text-muted-foreground'>手动</div>
-                  <div className='mt-1 text-2xl font-semibold'>{selectedElements.length}</div>
-                </div>
-                <div className='rounded-md bg-muted/30 p-3'>
-                  <div className='text-xs text-muted-foreground'>自动</div>
-                  <div className='mt-1 text-2xl font-semibold'>{queryPreview.match_count}</div>
-                </div>
-                <div className='rounded-md bg-muted/30 p-3'>
-                  <div className='text-xs text-muted-foreground'>重叠</div>
-                  <div className='mt-1 text-2xl font-semibold'>{overlapCount}</div>
-                </div>
-                <div className='rounded-md bg-muted/30 p-3'>
-                  <div className='text-xs text-muted-foreground'>合计</div>
-                  <div className='mt-1 text-2xl font-semibold'>{finalPreviewElements.length}</div>
+              <div className='grid gap-2 text-sm text-muted-foreground'>
+                <div className='flex flex-wrap items-center gap-2'>
+                  <Badge variant='secondary'>{finalPreviewElements.length} 个元素</Badge>
+                  <span>手动 {selectedElements.length}</span>
+                  <span>自动 {queryPreview.match_count}</span>
                 </div>
               </div>
-              <div className='mt-3 flex flex-wrap gap-2'>
+              <div className='mt-3 grid gap-2'>
                 {finalPreviewElements.slice(0, 8).map((element) => (
-                  <Badge key={element.id} variant='secondary' className='font-normal'>
+                  <Badge
+                    key={element.id}
+                    variant='secondary'
+                    className='w-fit max-w-full truncate font-normal'
+                  >
                     {element.id}
                   </Badge>
                 ))}
@@ -4084,16 +4782,17 @@ function ViewDefinitionPanel({
                       variant={issue.fixable ? 'default' : 'destructive'}
                     >
                       <AlertCircle className='size-4' />
-                      <AlertTitle>
+                      <AlertTitle className='min-w-0 break-words leading-6'>
                         {issue.source.id} / {labelRelation(issue.relationType)}
                       </AlertTitle>
-                      <AlertDescription className='space-y-2'>
-                        <div>{issue.message}</div>
+                      <AlertDescription className='min-w-0 space-y-2'>
+                        <div className='break-words'>{issue.message}</div>
                         {issue.fixable && (
                           <Button
                             type='button'
                             size='sm'
                             variant='outline'
+                            className='h-auto max-w-full whitespace-normal text-left leading-5'
                             onClick={() =>
                               onSetIncludedElements(
                                 Array.from(new Set([...includedOrder, issue.targetId]))
@@ -4123,80 +4822,52 @@ function ViewDefinitionPanel({
 
           <div className='space-y-4'>
             <div className='rounded-md border bg-background p-4'>
-              <div className='flex items-center justify-between gap-3'>
-                <div>
-                  <div className='text-sm font-semibold'>自动收集元素</div>
-                  <p className='text-xs text-muted-foreground'>
-                    Viewpoint 默认查询 + 当前 View 的附加条件。
-                  </p>
-                </div>
-                <Button
-                  type='button'
-                  variant='ghost'
-                  size='sm'
-                  onClick={() => setShowQueryEditor((current) => !current)}
-                >
-                  {showQueryEditor ? '收起' : '展开'}
-                </Button>
+              <div>
+                <div className='text-sm font-semibold'>自动收集范围</div>
+                <p className='text-xs text-muted-foreground'>
+                  继承 Viewpoint 默认查询，当前 View 的设置会覆盖默认值。
+                </p>
               </div>
               <div className='mt-3 text-sm'>
                 {stringList(viewpointQuery.types).length
                   ? formatList(stringList(viewpointQuery.types), labelType)
                   : 'Viewpoint 默认不限制'}
               </div>
-              {showQueryEditor && (
-                <div className='mt-4 space-y-4 border-t pt-4'>
-                  <div className='grid gap-4 lg:grid-cols-2'>
-                    <Field label='Element types'>
-                      <MultiCheckGrid
-                        options={elementsTypes(elements)}
-                        selected={selectedTypes}
-                        onChange={(next) => onUpdateQuery({ types: next })}
-                      />
-                    </Field>
-                    <Field label='Relations to focus'>
-                      <MultiCheckGrid
-                        options={['satisfy', 'verify', 'refine', 'constrain', 'include', 'conform']}
-                        selected={selectedRelations}
-                        onChange={(next) => onUpdateQuery({ relations: next })}
-                        label={labelRelation}
-                      />
-                    </Field>
-                    <Field label='Owners'>
-                      <MultiCheckGrid
-                        options={ownerOptions}
-                        selected={selectedOwners}
-                        onChange={(next) => onUpdateQuery({ owners: next })}
-                      />
-                    </Field>
-                    <Field label='Keyword'>
-                      <Input
-                        value={String(query.text || '')}
-                        onChange={(event) => onUpdateQuery({ text: event.target.value })}
-                        placeholder='搜索 ID、名称、描述、属性'
-                      />
-                    </Field>
-                    <Field label='Relation depth'>
-                      <Select
-                        value={String(query.relation_depth ?? 0)}
-                        onValueChange={(value) =>
-                          onUpdateQuery({ relation_depth: Number(value) })
-                        }
-                      >
-                        <SelectTrigger className='w-full'>
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value='0'>0 - only matched/manual elements</SelectItem>
-                          <SelectItem value='1'>1 - include directly related elements</SelectItem>
-                          <SelectItem value='2'>2 - include two relation hops</SelectItem>
-                          <SelectItem value='3'>3 - include three relation hops</SelectItem>
-                        </SelectContent>
-                      </Select>
-                    </Field>
-                  </div>
-                </div>
-              )}
+              <div className='mt-4 grid gap-4 border-t pt-4 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_260px]'>
+                <Field label='Element types'>
+                  <MultiCheckGrid
+                    options={elementsTypes(elements)}
+                    selected={selectedTypes}
+                    onChange={(next) => onUpdateQuery({ types: next })}
+                  />
+                </Field>
+                <Field label='Relations to focus'>
+                  <MultiCheckGrid
+                    options={['satisfy', 'verify', 'refine', 'constrain', 'include', 'conform']}
+                    selected={selectedRelations}
+                    onChange={(next) => onUpdateQuery({ relations: next })}
+                    label={labelRelation}
+                  />
+                </Field>
+                <Field label='Relation depth'>
+                  <Select
+                    value={String(query.relation_depth ?? 0)}
+                    onValueChange={(value) =>
+                      onUpdateQuery({ relation_depth: Number(value) })
+                    }
+                  >
+                    <SelectTrigger className='w-full'>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value='0'>0 - only matched/manual elements</SelectItem>
+                      <SelectItem value='1'>1 - include directly related elements</SelectItem>
+                      <SelectItem value='2'>2 - include two relation hops</SelectItem>
+                      <SelectItem value='3'>3 - include three relation hops</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </Field>
+              </div>
             </div>
 
             <div className='rounded-md border bg-background p-4'>
@@ -4213,7 +4884,7 @@ function ViewDefinitionPanel({
                   size='sm'
                   onClick={() => setShowLibrary((current) => !current)}
                 >
-                  {showLibrary ? '收起元素库' : '展开元素库'}
+                  {showLibrary ? '收起元素库' : '添加元素'}
                 </Button>
               </div>
               <div
@@ -4382,10 +5053,13 @@ function ViewsTab({
   onUpdateViewAttributes,
   onUpdateViewQuery,
   onSaveCurrent,
+  onDeleteCurrent,
   validation,
-  aiReview,
+  aiValidationFixReview,
+  aiValidationFixApplyResult,
   busy,
-  onAiReview,
+  onAiValidationFixReview,
+  onApplyAiValidationFixes,
 }: {
   views: SysmlElement[]
   viewpoints: SysmlElement[]
@@ -4401,10 +5075,13 @@ function ViewsTab({
   onUpdateViewAttributes: (patch: Record<string, unknown>) => void
   onUpdateViewQuery: (patch: Record<string, unknown>) => void
   onSaveCurrent: () => void
+  onDeleteCurrent: () => void
   validation: ValidationPayload | null
-  aiReview: AiModelReview | null
+  aiValidationFixReview: AiValidationFixReview | null
+  aiValidationFixApplyResult: AiValidationFixApplyResult | null
   busy: string
-  onAiReview: () => void
+  onAiValidationFixReview: () => void
+  onApplyAiValidationFixes: () => void
 }) {
   const isView = form.type === 'View'
   const isViewpoint = form.type === 'Viewpoint'
@@ -4539,12 +5216,29 @@ function ViewsTab({
                     : '选择一个 View 或 Viewpoint，或按流程创建新的视图。'}
               </CardDescription>
             </div>
-            <div className='flex items-center gap-2'>
+            <div className='flex flex-wrap items-center justify-end gap-2'>
               <Badge variant='secondary'>
                 {form.type === 'View' || form.type === 'Viewpoint'
                   ? labelType(form.type)
                   : 'Idle'}
               </Badge>
+              <Button
+                size='sm'
+                variant='destructive'
+                onClick={onDeleteCurrent}
+                disabled={
+                  busy === 'delete-element' ||
+                  !form.id ||
+                  (form.type !== 'View' && form.type !== 'Viewpoint')
+                }
+              >
+                {busy === 'delete-element' ? (
+                  <Loader2 className='size-4 animate-spin' />
+                ) : (
+                  <Trash2 className='size-4' />
+                )}
+                删除当前
+              </Button>
               <Button
                 size='sm'
                 onClick={onSaveCurrent}
@@ -4586,8 +5280,14 @@ function ViewsTab({
           </CardContent>
         </Card>
 
-        <ViewValidationBar validation={validation} />
-        <AiModelReviewPanel review={aiReview} busy={busy} onReview={onAiReview} />
+        <ViewValidationBar
+          validation={validation}
+          aiFixReview={aiValidationFixReview}
+          applyResult={aiValidationFixApplyResult}
+          busy={busy}
+          onAiFix={onAiValidationFixReview}
+          onApplyFixes={onApplyAiValidationFixes}
+        />
       </div>
     </div>
   )
@@ -4697,34 +5397,121 @@ function ViewStudioEmpty({
 
 function ViewValidationBar({
   validation,
+  aiFixReview,
+  applyResult,
+  busy,
+  onAiFix,
+  onApplyFixes,
 }: {
   validation: ValidationPayload | null
+  aiFixReview: AiValidationFixReview | null
+  applyResult: AiValidationFixApplyResult | null
+  busy: string
+  onAiFix: () => void
+  onApplyFixes: () => void
 }) {
-  const errors = validation?.summary.errors || 0
-  const warnings = validation?.summary.warnings || 0
+  const viewIssues = (validation?.issues || []).filter((issue) => {
+    const message = issue.message || ''
+    return (
+      issue.element_id.startsWith('VIEW') ||
+      issue.element_id.startsWith('VP') ||
+      message.includes('Viewpoint') ||
+      message.includes('View scope') ||
+      message.includes('View references')
+    )
+  })
+  const errors = viewIssues.filter((issue) => issue.severity === 'error').length
+  const warnings = viewIssues.filter((issue) => issue.severity === 'warning').length
   const hasIssues = errors + warnings > 0
+  const fixing = busy === 'ai-validation-fix'
+  const applying = busy === 'ai-validation-apply'
 
   return (
-    <div
-      className={cn(
-        'flex flex-wrap items-center justify-between gap-3 rounded-2xl bg-muted/25 px-4 py-3 text-sm',
-        hasIssues && 'bg-destructive/10'
-      )}
-    >
-      <div className='flex items-center gap-2'>
-        {hasIssues ? (
-          <AlertCircle className='size-4 text-destructive' />
-        ) : (
-          <CheckCircle2 className='size-4 text-emerald-600' />
-        )}
-        <span className='font-medium'>
-          {hasIssues ? 'View 校验存在问题' : 'View 校验通过'}
-        </span>
-      </div>
-      <span className='text-xs text-muted-foreground'>
-        {errors} 个错误，{warnings} 个警告
-      </span>
-    </div>
+    <Card className={cn('overflow-hidden border-0 bg-muted/25 shadow-none', hasIssues && 'bg-destructive/10')}>
+      <CardHeader className='pb-3'>
+        <div className='flex flex-wrap items-center justify-between gap-3'>
+          <div className='flex items-center gap-2'>
+            {hasIssues ? (
+              <AlertCircle className='size-4 text-destructive' />
+            ) : (
+              <CheckCircle2 className='size-4 text-emerald-600' />
+            )}
+            <CardTitle className='text-base'>
+              {hasIssues ? 'View 校验存在问题' : 'View 校验通过'}
+            </CardTitle>
+          </div>
+          <div className='flex flex-wrap items-center justify-end gap-2'>
+            {hasIssues ? (
+              <>
+                <Button type='button' size='sm' variant='outline' onClick={onAiFix} disabled={fixing}>
+                  {fixing ? <Loader2 className='size-4 animate-spin' /> : <Sparkles className='size-4' />}
+                  AI 修复建议
+                </Button>
+                <Button type='button' size='sm' onClick={onApplyFixes} disabled={applying}>
+                  {applying ? <Loader2 className='size-4 animate-spin' /> : <Wrench className='size-4' />}
+                  一键应用
+                </Button>
+              </>
+            ) : null}
+            <span className='text-xs text-muted-foreground'>
+              {errors} 个错误，{warnings} 个警告
+            </span>
+          </div>
+        </div>
+      </CardHeader>
+      {hasIssues || fixing || applying || aiFixReview || applyResult ? (
+        <CardContent className='space-y-3'>
+          {hasIssues ? (
+            <Collapsible>
+              <CollapsibleTrigger asChild>
+                <Button variant='ghost' size='sm' className='w-full justify-between rounded-xl bg-background/70'>
+                  展开查看 {viewIssues.length} 条 View 问题
+                  <Badge variant='outline'>{warnings} warnings</Badge>
+                </Button>
+              </CollapsibleTrigger>
+              <CollapsibleContent>
+                <div className='mt-3 divide-y rounded-xl bg-background/80'>
+                  {viewIssues.map((issue, index) => (
+                    <ValidationIssueRow key={`${issue.element_id}-view-${index}`} issue={issue} />
+                  ))}
+                </div>
+              </CollapsibleContent>
+            </Collapsible>
+          ) : null}
+          {applying ? (
+            <div className='flex items-center gap-2 rounded-xl border bg-background/70 p-3 text-sm text-muted-foreground'>
+              <Loader2 className='size-4 animate-spin' />
+              正在应用 View 修复
+            </div>
+          ) : applyResult ? (
+            <div className='rounded-xl border bg-emerald-50 p-4 text-sm text-emerald-950 dark:bg-emerald-950/25 dark:text-emerald-100'>
+              <div className='flex flex-wrap items-center justify-between gap-2'>
+                <div className='font-semibold'>View 修复已应用</div>
+                <Badge variant='secondary'>{applyResult.applied.length} applied</Badge>
+              </div>
+              <div className='mt-2 text-xs'>
+                修复前：{String(applyResult.before.errors ?? 0)} 错误 / {String(applyResult.before.warnings ?? 0)} 警告；
+                修复后：{String(applyResult.after.errors ?? 0)} 错误 / {String(applyResult.after.warnings ?? 0)} 警告
+              </div>
+            </div>
+          ) : null}
+          {fixing ? (
+            <div className='flex items-center gap-2 rounded-xl border bg-background/70 p-3 text-sm text-muted-foreground'>
+              <Loader2 className='size-4 animate-spin' />
+              正在生成 View 修复建议
+            </div>
+          ) : aiFixReview ? (
+            <div className='rounded-xl border bg-background/70 p-4'>
+              <div className='mb-3 flex items-center justify-between gap-2'>
+                <div className='text-sm font-semibold'>AI View 修复建议</div>
+                <Badge variant='secondary'>{aiFixReview.issue_count} issues</Badge>
+              </div>
+              <MarkdownMessage content={aiFixReview.review} compact />
+            </div>
+          ) : null}
+        </CardContent>
+      ) : null}
+    </Card>
   )
 }
 
@@ -4751,11 +5538,28 @@ function ViewpointDefinitionPanel({
   const selectedAllowedRelations = stringList(attributes.allowed_relations)
   const selectedQueryTypes = stringList(defaultQuery.types)
   const selectedQueryRelations = stringList(defaultQuery.relations)
+  const selectedTypes = selectedAllowedTypes.length
+    ? selectedAllowedTypes
+    : selectedQueryTypes
+  const selectedRelations = selectedAllowedRelations.length
+    ? selectedAllowedRelations
+    : selectedQueryRelations
   const [showAdvanced, setShowAdvanced] = useState(false)
-  const [showTemplate, setShowTemplate] = useState(false)
 
   const updateDefaultQuery = (patch: Record<string, unknown>) => {
     onUpdateAttributes({ default_query: { ...defaultQuery, ...patch } })
+  }
+  const updateScopeTypes = (types: string[]) => {
+    onUpdateAttributes({
+      allowed_types: types,
+      default_query: { ...defaultQuery, types },
+    })
+  }
+  const updateScopeRelations = (relations: string[]) => {
+    onUpdateAttributes({
+      allowed_relations: relations,
+      default_query: { ...defaultQuery, relations },
+    })
   }
   const applyPreset = (preset: (typeof viewpointPresets)[number]) => {
     onUpdateAttributes({
@@ -4767,29 +5571,13 @@ function ViewpointDefinitionPanel({
       document_template: preset.document_template,
     })
   }
-  const ruleSummary = [
-    `允许：${formatList(selectedAllowedTypes, labelType) || '未限制'}`,
-    `必须：${formatList(selectedRequiredTypes, labelType) || '未设置'}`,
-    `关系：${formatList(selectedAllowedRelations, labelRelation) || '未限制'}`,
-  ]
-  const querySummary = [
-    `默认类型：${formatList(selectedQueryTypes, labelType) || '未限制'}`,
-    `默认关系：${formatList(selectedQueryRelations, labelRelation) || '未限制'}`,
-    `关系深度：${String(defaultQuery.relation_depth ?? 1)}`,
-  ]
-  const documentTemplate = String(attributes.document_template || '')
-  const templateLabel =
-    !documentTemplate || documentTemplate === 'summary-trace-validation'
-      ? '默认摘要/追踪/校验模板'
-      : '自定义模板'
 
   return (
     <div className='rounded-2xl bg-muted/20 p-4'>
       <div className='pb-3'>
         <CardTitle className='text-base'>Viewpoint Setup</CardTitle>
         <CardDescription>
-          Pick a review scenario first. Advanced rules and document templates stay
-          available when you need precise control.
+          先选场景，再维护默认收集范围；高级校验按需展开。
         </CardDescription>
       </div>
       <div className='space-y-5'>
@@ -4807,7 +5595,7 @@ function ViewpointDefinitionPanel({
             <div>
               <div className='text-sm font-semibold'>选择一个常用场景</div>
               <p className='text-xs text-muted-foreground'>
-                系统会自动填好元素类型、关系、默认查询和文档模板。
+                系统会自动填好默认收集范围和校验规则。
               </p>
             </div>
             <Badge variant='secondary'>Recommended</Badge>
@@ -4829,36 +5617,51 @@ function ViewpointDefinitionPanel({
           </div>
         </div>
 
-        <div className='grid gap-4 lg:grid-cols-3'>
-          <div className='rounded-2xl bg-background/70 p-4'>
-            <div className='text-sm font-semibold'>规则摘要</div>
-            <div className='mt-3 space-y-2 text-sm text-muted-foreground'>
-              {ruleSummary.map((line) => (
-                <div key={line}>{line}</div>
-              ))}
-            </div>
+        <div className='space-y-4 rounded-2xl bg-background/70 p-4'>
+          <div>
+            <div className='text-sm font-semibold'>默认收集范围</div>
+            <p className='text-xs text-muted-foreground'>
+              这些设置会同时作为 View 的默认查询和 Viewpoint 的允许范围。
+            </p>
           </div>
-          <div className='rounded-2xl bg-background/70 p-4'>
-            <div className='text-sm font-semibold'>默认查询</div>
-            <div className='mt-3 space-y-2 text-sm text-muted-foreground'>
-              {querySummary.map((line) => (
-                <div key={line}>{line}</div>
-              ))}
-            </div>
-          </div>
-          <div className='rounded-2xl bg-background/70 p-4'>
-            <div className='text-sm font-semibold'>文档输出</div>
-            <div className='mt-3 text-sm text-muted-foreground'>{templateLabel}</div>
-            <div className='mt-3 flex flex-wrap gap-2'>
-              <Button
-                type='button'
-                variant='outline'
-                size='sm'
-                onClick={() => setShowTemplate((current) => !current)}
+          <div className='grid gap-4 lg:grid-cols-2'>
+            <Field label='包含元素类型'>
+              <MultiCheckGrid
+                options={typeOptions}
+                selected={selectedTypes}
+                onChange={updateScopeTypes}
+                label={labelType}
+              />
+            </Field>
+            <Field label='包含关系'>
+              <MultiCheckGrid
+                options={relationOptions}
+                selected={selectedRelations}
+                onChange={updateScopeRelations}
+                label={labelRelation}
+              />
+            </Field>
+            <Field label='关系深度'>
+              <Select
+                value={String(defaultQuery.relation_depth ?? 1)}
+                onValueChange={(value) =>
+                  updateDefaultQuery({ relation_depth: Number(value) })
+                }
               >
-                {showTemplate ? '收起模板' : '编辑模板'}
-              </Button>
-            </div>
+                <SelectTrigger className='w-full'>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value='0'>0 - 只包含匹配/手动元素</SelectItem>
+                  <SelectItem value='1'>1 - 包含直接相关元素</SelectItem>
+                  <SelectItem value='2'>2 - 包含两跳关系元素</SelectItem>
+                  <SelectItem value='3'>3 - 包含三跳关系元素</SelectItem>
+                </SelectContent>
+              </Select>
+              <p className='mt-2 text-xs text-muted-foreground'>
+                从匹配到的元素出发，沿上面选中的关系继续纳入相邻元素；0 表示不扩展，1 表示只加入直接相连元素，2/3 表示继续向外扩展两跳或三跳。
+              </p>
+            </Field>
           </div>
         </div>
 
@@ -4868,142 +5671,27 @@ function ViewpointDefinitionPanel({
             variant='outline'
             onClick={() => setShowAdvanced((current) => !current)}
           >
-            {showAdvanced ? '收起高级规则' : '修改高级规则'}
-          </Button>
-          <Button
-            type='button'
-            variant='ghost'
-            onClick={() => {
-              setShowAdvanced(true)
-              setShowTemplate(true)
-            }}
-          >
-            展开全部
+            {showAdvanced ? '收起高级设置' : '高级设置'}
           </Button>
         </div>
 
         {showAdvanced && (
           <div className='space-y-5 rounded-2xl bg-background/70 p-4'>
             <div>
-              <div className='text-sm font-semibold'>Advanced Rules</div>
+              <div className='text-sm font-semibold'>高级设置</div>
               <p className='text-xs text-muted-foreground'>
-                Fine tune what a View may contain and what it should collect by default.
+                只在需要更严格校验时调整。
               </p>
             </div>
 
-            <div className='grid gap-4 lg:grid-cols-3'>
-              <Field label='Allowed element types'>
-                <MultiCheckGrid
-                  options={typeOptions}
-                  selected={selectedAllowedTypes}
-                  onChange={(next) => onUpdateAttributes({ allowed_types: next })}
-                  label={labelType}
-                />
-              </Field>
-              <Field label='Required element types'>
-                <MultiCheckGrid
-                  options={typeOptions}
-                  selected={selectedRequiredTypes}
-                  onChange={(next) => onUpdateAttributes({ required_types: next })}
-                  label={labelType}
-                />
-              </Field>
-              <Field label='Allowed relations'>
-                <MultiCheckGrid
-                  options={relationOptions}
-                  selected={selectedAllowedRelations}
-                  onChange={(next) => onUpdateAttributes({ allowed_relations: next })}
-                  label={labelRelation}
-                />
-              </Field>
-            </div>
-
-            <div className='rounded-md border bg-muted/20 p-4'>
-              <div className='mb-3'>
-                <div className='text-sm font-semibold'>Default View Query</div>
-                <p className='text-xs text-muted-foreground'>
-                  New or linked Views inherit this query unless they override it.
-                </p>
-              </div>
-              <div className='grid gap-4 lg:grid-cols-2'>
-                <Field label='Default element types'>
-                  <MultiCheckGrid
-                    options={typeOptions}
-                    selected={selectedQueryTypes}
-                    onChange={(next) => updateDefaultQuery({ types: next })}
-                    label={labelType}
-                  />
-                </Field>
-                <Field label='Default relations'>
-                  <MultiCheckGrid
-                    options={relationOptions}
-                    selected={selectedQueryRelations}
-                    onChange={(next) => updateDefaultQuery({ relations: next })}
-                    label={labelRelation}
-                  />
-                </Field>
-                <Field label='Default keyword'>
-                  <Input
-                    value={String(defaultQuery.text || '')}
-                    onChange={(event) => updateDefaultQuery({ text: event.target.value })}
-                    placeholder='留空表示不按关键词过滤'
-                  />
-                </Field>
-                <Field label='Default relation depth'>
-                  <Select
-                    value={String(defaultQuery.relation_depth ?? 1)}
-                    onValueChange={(value) =>
-                      updateDefaultQuery({ relation_depth: Number(value) })
-                    }
-                  >
-                    <SelectTrigger className='w-full'>
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value='0'>0 - only matched/manual elements</SelectItem>
-                      <SelectItem value='1'>1 - include directly related elements</SelectItem>
-                      <SelectItem value='2'>2 - include two relation hops</SelectItem>
-                      <SelectItem value='3'>3 - include three relation hops</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </Field>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {showTemplate && (
-          <div className='space-y-4 rounded-md border bg-background p-4'>
-            <div className='grid gap-4 lg:grid-cols-[minmax(0,1fr)_420px]'>
-              <Field label='Document template'>
-                <Textarea
-                  className='min-h-[260px] font-mono text-xs'
-                  value={documentTemplate}
-                  onChange={(event) =>
-                    onUpdateAttributes({ document_template: event.target.value })
-                  }
-                  placeholder='Use {{view.scope}}, {{view.summary}}, {{view.traceability}}, and {{view.validation}}.'
-                />
-              </Field>
-              <div className='rounded-md border bg-muted/20 p-3 text-xs text-muted-foreground'>
-                <div className='mb-2 font-semibold text-foreground'>Template tokens</div>
-                <div className='space-y-1 font-mono'>
-                  <div>{'{{view.name}}'} / {'{{view.description}}'}</div>
-                  <div>{'{{viewpoint.name}}'} / {'{{viewpoint.purpose}}'}</div>
-                  <div>{'{{view.scope}}'} / {'{{view.summary}}'}</div>
-                  <div>{'{{view.traceability}}'} / {'{{view.validation}}'}</div>
-                </div>
-                <Button
-                  type='button'
-                  variant='outline'
-                  size='sm'
-                  className='mt-4'
-                  onClick={() => onUpdateAttributes({ document_template: defaultViewpointTemplate })}
-                >
-                  使用默认模板
-                </Button>
-              </div>
-            </div>
+            <Field label='必需元素类型'>
+              <MultiCheckGrid
+                options={typeOptions}
+                selected={selectedRequiredTypes}
+                onChange={(next) => onUpdateAttributes({ required_types: next })}
+                label={labelType}
+              />
+            </Field>
           </div>
         )}
       </div>
@@ -5011,20 +5699,15 @@ function ViewpointDefinitionPanel({
   )
 }
 
-function AiModelReviewPanel({
-  review,
+function ClosureSuggestionsPanel({
   closureSuggestions,
   busy,
-  onReview,
   onClosureSuggestions,
 }: {
-  review: AiModelReview | null
   closureSuggestions?: AiClosureSuggestionResponse | null
   busy: string
-  onReview: () => void
   onClosureSuggestions?: () => void
 }) {
-  const loading = busy === 'ai-model-review'
   const closureLoading = busy === 'ai-closure-suggestions'
 
   return (
@@ -5032,8 +5715,8 @@ function AiModelReviewPanel({
       <CardHeader>
         <div className='flex items-center justify-between gap-3'>
           <div>
-            <CardTitle>{'AI \u6a21\u578b\u5ba1\u67e5'}</CardTitle>
-            <CardDescription>{'\u57fa\u4e8e\u5f53\u524d VE \u6a21\u578b\u7ed9\u51fa\u4e00\u81f4\u6027\u548c\u8ffd\u6eaf\u5efa\u8bae'}</CardDescription>
+            <CardTitle>需求闭环建议</CardTitle>
+            <CardDescription>基于当前模型识别缺少验证、约束或追踪闭环的需求。</CardDescription>
           </div>
           <div className='flex flex-wrap gap-2'>
             {onClosureSuggestions ? (
@@ -5051,33 +5734,10 @@ function AiModelReviewPanel({
                 闭环建议
               </Button>
             ) : null}
-            <Button variant='secondary' size='sm' onClick={onReview} disabled={loading}>
-              {loading ? (
-                <Loader2 className='size-4 animate-spin' />
-              ) : (
-                <Sparkles className='size-4' />
-              )}
-              {'AI \u5ba1\u67e5'}
-            </Button>
           </div>
         </div>
       </CardHeader>
       <CardContent className='space-y-4'>
-        {loading ? (
-          <div className='flex items-center gap-2 text-sm text-muted-foreground'>
-            <Loader2 className='size-4 animate-spin' />
-            {'AI \u5ba1\u67e5\u4e2d'}
-          </div>
-        ) : review ? (
-          <div className='rounded-md border bg-muted/20 p-4'>
-            <MarkdownMessage content={review.review} compact />
-          </div>
-        ) : (
-          <EmptyState
-            title={'\u5c1a\u672a\u8fd0\u884c AI \u5ba1\u67e5'}
-            description={'\u70b9\u51fb AI \u5ba1\u67e5\u540e\uff0c\u7cfb\u7edf\u4f1a\u5206\u6790\u5f53\u524d\u6a21\u578b\u7684\u5b8c\u6574\u6027\u3001\u8ffd\u6eaf\u6027\u548c\u6587\u6863\u53ef\u751f\u6210\u6027'}
-          />
-        )}
         {closureLoading ? (
           <div className='flex items-center gap-2 text-sm text-muted-foreground'>
             <Loader2 className='size-4 animate-spin' />
@@ -5116,7 +5776,9 @@ function AiModelReviewPanel({
               <p className='text-sm text-muted-foreground'>AI 没有返回可结构化的闭环建议。</p>
             )}
           </div>
-        ) : null}
+        ) : (
+          <EmptyState title='尚未生成建议' description='点击闭环建议后，会列出需要补齐验证、约束或关系的需求。' />
+        )}
       </CardContent>
     </Card>
   )
@@ -6053,7 +6715,6 @@ type VersionTabProps = {
   validation: ValidationPayload | null
   branches: Branch[]
   commits: Commit[]
-  tags: Tag[]
   auditEvents: AuditEvent[]
   diff: DiffPayload | null
   aiImpact: AiVersionImpact | null
@@ -6065,8 +6726,6 @@ type VersionTabProps = {
   setRollbackCommit: (value: string) => void
   newBranch: string
   setNewBranch: (value: string) => void
-  newTag: string
-  setNewTag: (value: string) => void
   mergeSource: string
   setMergeSource: (value: string) => void
   forceMerge: boolean
@@ -6078,7 +6737,7 @@ type VersionTabProps = {
   onAiImpact: () => void
   onRollback: () => void
   onCreateBranch: () => void
-  onCreateTag: () => void
+  onDeleteCommit: (commitId: string) => void
   onMerge: () => void
   busy: string
 }
@@ -6103,31 +6762,33 @@ function VersionTab(props: VersionTabProps) {
     '未选择'
   const mergeLabel = props.mergeSource || '未选择'
   const commitOptions = [
-    { id: 'working', label: 'working' },
-    ...props.tags.map((tag) => ({
-      id: `tag:${tag.id}`,
-      label: `tag:${tag.name} / ${shortLabel(tag.commit, 14)}`,
-    })),
+    { id: 'working', label: '当前工作区（未提交）' },
     ...props.commits.map((commit) => ({
       id: commit.id,
-      label: `${shortLabel(commit.id, 13)} / ${shortLabel(commit.message, 28)}`,
+      label: `提交：${shortLabel(commit.id, 12)} / ${shortLabel(commit.message, 30)}`,
     })),
   ]
+  const canRunDiff = props.diffFrom !== props.diffTo
+  const canCreateBranch = Boolean(props.newBranch.trim())
+  const canRollback = Boolean(props.rollbackCommit)
+  const canMerge = Boolean(
+    props.mergeSource && props.mergeSource !== props.currentBranch
+  )
   return (
     <div className='space-y-4'>
       <Card className='sysml-card overflow-hidden'>
         <CardHeader className='bg-muted/20'>
           <div className='flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between'>
             <div>
-              <CardTitle>版本状态</CardTitle>
+              <CardTitle>当前版本</CardTitle>
               <CardDescription>
-                当前分支、模型规模、提交基线和待执行版本操作的集中视图
+                先提交当前模型，再比较、开分支、回滚或合并变更
               </CardDescription>
             </div>
             <div className='flex flex-wrap items-center gap-2'>
-              <Badge variant='secondary'>branch / {props.currentBranch}</Badge>
+              <Badge variant='secondary'>当前分支 / {props.currentBranch}</Badge>
               {currentCommit && (
-                <Badge variant='outline'>{shortLabel(currentCommit.id, 14)}</Badge>
+                <Badge variant='outline'>最新提交 / {shortLabel(currentCommit.id, 14)}</Badge>
               )}
               <Button
                 variant='outline'
@@ -6156,7 +6817,7 @@ function VersionTab(props: VersionTabProps) {
                 disabled={props.busy === 'commit'}
               >
                 <GitCommitHorizontal className='size-4' />
-                Commit
+                提交当前状态
               </Button>
             </div>
           </div>
@@ -6167,7 +6828,6 @@ function VersionTab(props: VersionTabProps) {
             <LocalMetric label='需求' value={requirementCount} />
             <LocalMetric label='结构块' value={blockCount} />
             <LocalMetric label='提交' value={props.commits.length} />
-            <LocalMetric label='标签基线' value={props.tags.length} />
             <LocalMetric
               label='校验问题'
               value={issueCount}
@@ -6210,173 +6870,193 @@ function VersionTab(props: VersionTabProps) {
           <div className='flex items-center justify-between'>
             <div>
               <CardTitle>版本操作</CardTitle>
-              <CardDescription>分支、Diff、回滚和合并</CardDescription>
+              <CardDescription>常用操作在左侧，回滚和合并放在谨慎操作区</CardDescription>
             </div>
             <Button variant='outline' size='sm' onClick={props.onRefresh}>
               <RefreshCw className='size-4' />
             </Button>
           </div>
         </CardHeader>
-        <CardContent className='grid gap-3 p-4 lg:grid-cols-2 2xl:grid-cols-[1.25fr_1.25fr_1fr_1fr_1fr] [&>div]:min-w-0 [&>div]:rounded-2xl [&>div]:bg-muted/25 [&>div]:p-4 [&>[data-orientation=horizontal]]:hidden'>
-          <div className='grid gap-3'>
-            <VersionActionTitle
-              icon={GitCompare}
-              title='比较'
-              description='选择两个版本查看变化'
-            />
-            <div className='grid gap-3 sm:grid-cols-2'>
-              <Field label='Diff From'>
-                <Select value={props.diffFrom} onValueChange={props.setDiffFrom}>
-                  <SelectTrigger className='w-full min-w-0 overflow-hidden [&>span]:truncate'>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {commitOptions.map((item) => (
-                      <SelectItem key={item.id} value={item.id}>
-                        {item.label}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </Field>
-              <Field label='Diff To'>
-                <Select value={props.diffTo} onValueChange={props.setDiffTo}>
-                  <SelectTrigger className='w-full min-w-0 overflow-hidden [&>span]:truncate'>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {commitOptions.map((item) => (
-                      <SelectItem key={item.id} value={item.id}>
-                        {item.label}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </Field>
-            </div>
-            <Button onClick={props.onDiff} disabled={props.busy === 'diff'}>
-              <GitCompare className='size-4' />
-              运行 Diff
-            </Button>
-            <Button
-              variant='secondary'
-              onClick={props.onAiImpact}
-              disabled={props.busy === 'ai-version-impact'}
-            >
-              {props.busy === 'ai-version-impact' ? (
-                <Loader2 className='size-4 animate-spin' />
-              ) : (
-                <Sparkles className='size-4' />
+        <CardContent className='grid gap-4 p-4 xl:grid-cols-[minmax(0,1.35fr)_minmax(320px,0.65fr)]'>
+          <div className='space-y-4'>
+            <div className='rounded-2xl border bg-background p-4'>
+              <VersionActionTitle
+                icon={GitCompare}
+                title='1. 比较两个版本'
+                description='先选旧版本和新版本，查看新增、删除和修改内容'
+              />
+              <div className='mt-4 grid gap-3 md:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] md:items-end'>
+                <Field label='旧版本'>
+                  <Select value={props.diffFrom} onValueChange={props.setDiffFrom}>
+                    <SelectTrigger className='w-full min-w-0 overflow-hidden [&>span]:truncate'>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {commitOptions.map((item) => (
+                        <SelectItem key={item.id} value={item.id}>
+                          {item.label}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </Field>
+                <ArrowRight className='mb-3 hidden size-4 text-muted-foreground md:block' />
+                <Field label='新版本'>
+                  <Select value={props.diffTo} onValueChange={props.setDiffTo}>
+                    <SelectTrigger className='w-full min-w-0 overflow-hidden [&>span]:truncate'>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {commitOptions.map((item) => (
+                        <SelectItem key={item.id} value={item.id}>
+                          {item.label}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </Field>
+              </div>
+              <div className='mt-4 flex flex-col gap-2 sm:flex-row'>
+                <Button
+                  onClick={props.onDiff}
+                  disabled={props.busy === 'diff' || !canRunDiff}
+                >
+                  <GitCompare className='size-4' />
+                  查看差异
+                </Button>
+                <Button
+                  variant='secondary'
+                  onClick={props.onAiImpact}
+                  disabled={props.busy === 'ai-version-impact' || !canRunDiff}
+                >
+                  {props.busy === 'ai-version-impact' ? (
+                    <Loader2 className='size-4 animate-spin' />
+                  ) : (
+                    <Sparkles className='size-4' />
+                  )}
+                  分析变更影响
+                </Button>
+              </div>
+              {!canRunDiff && (
+                <p className='mt-2 text-xs text-muted-foreground'>
+                  请选择两个不同版本后再比较。
+                </p>
               )}
-              AI 影响分析
-            </Button>
-          </div>
-          <Separator />
-          <div className='grid gap-3'>
-            <VersionActionTitle
-              icon={RotateCcw}
-              title='回滚'
-              description='把工作区恢复到某次提交'
-            />
-            <Field label='回滚提交'>
-              <Select
-                value={props.rollbackCommit}
-                onValueChange={props.setRollbackCommit}
-              >
-                <SelectTrigger className='w-full min-w-0 overflow-hidden [&>span]:truncate'>
-                  <SelectValue placeholder='选择提交' />
-                </SelectTrigger>
-                <SelectContent>
-                  {props.commits.map((commit) => (
-                    <SelectItem key={commit.id} value={commit.id}>
-                      {commit.id} / {commit.message}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </Field>
-            <Button variant='destructive' onClick={props.onRollback}>
-              <RotateCcw className='size-4' />
-              回滚
-            </Button>
-          </div>
-          <Separator />
-          <div className='grid gap-3'>
-            <VersionActionTitle
-              icon={GitBranch}
-              title='分支'
-              description='创建并行工作线'
-            />
-            <Field label='新分支'>
-              <Input
-                placeholder='dev-power'
-                value={props.newBranch}
-                onChange={(event) => props.setNewBranch(event.target.value)}
+            </div>
+
+            <div className='rounded-2xl border bg-background p-4'>
+              <VersionActionTitle
+                icon={GitBranch}
+                title='2. 创建工作分支'
+                description='从当前分支复制一条并行工作线，适合试验或多人协作'
               />
-            </Field>
-            <Button variant='outline' onClick={props.onCreateBranch}>
-              <GitBranch className='size-4' />
-              创建分支
-            </Button>
+              <div className='mt-4 grid gap-3 md:grid-cols-[minmax(0,1fr)_auto] md:items-end'>
+                <Field label='新分支名称'>
+                  <Input
+                    placeholder='例如：dev-power'
+                    value={props.newBranch}
+                    onChange={(event) => props.setNewBranch(event.target.value)}
+                  />
+                </Field>
+                <Button
+                  variant='outline'
+                  onClick={props.onCreateBranch}
+                  disabled={props.busy === 'branch' || !canCreateBranch}
+                >
+                  <GitBranch className='size-4' />
+                  从当前分支创建
+                </Button>
+              </div>
+            </div>
           </div>
-          <Separator />
-          <div className='grid gap-3'>
-            <VersionActionTitle
-              icon={FileText}
-              title='标签'
-              description='冻结只读基线'
-            />
-            <Field label='标签快照'>
-              <Input
-                placeholder='PDR-baseline'
-                value={props.newTag}
-                onChange={(event) => props.setNewTag(event.target.value)}
+
+          <div className='space-y-4'>
+            <div className='rounded-2xl border border-destructive/20 bg-destructive/5 p-4'>
+              <VersionActionTitle
+                icon={RotateCcw}
+                title='谨慎：回滚当前分支'
+                description='把当前分支恢复到某次提交，之后的工作区内容会被覆盖'
               />
-            </Field>
-            <Button
-              variant='outline'
-              onClick={props.onCreateTag}
-              disabled={props.busy === 'tag'}
-            >
-              <FileText className='size-4' />
-              创建标签
-            </Button>
-            <p className='text-xs text-muted-foreground'>
-              标签对应 OpenMBEE 的只读基线，用于冻结已提交的模型状态。
-            </p>
-          </div>
-          <Separator />
-          <div className='grid gap-3'>
-            <VersionActionTitle
-              icon={GitMerge}
-              title='合并'
-              description='把其他分支并入当前分支'
-            />
-            <Field label='合并来源'>
-              <Select value={props.mergeSource} onValueChange={props.setMergeSource}>
-                <SelectTrigger className='w-full'>
-                  <SelectValue placeholder='选择分支' />
-                </SelectTrigger>
-                <SelectContent>
-                  {props.branches.map((item) => (
-                    <SelectItem key={item.name} value={item.name}>
-                      {item.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </Field>
-            <label className='flex items-center gap-2 text-sm'>
-              <Checkbox
-                checked={props.forceMerge}
-                onCheckedChange={(checked) => props.setForceMerge(Boolean(checked))}
+              <div className='mt-4 grid gap-3'>
+                <Field label='回滚到'>
+                  <Select
+                    value={props.rollbackCommit}
+                    onValueChange={props.setRollbackCommit}
+                  >
+                    <SelectTrigger className='w-full min-w-0 overflow-hidden bg-background [&>span]:truncate'>
+                      <SelectValue placeholder='选择提交' />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {props.commits.map((commit) => (
+                        <SelectItem key={commit.id} value={commit.id}>
+                          {shortLabel(commit.id, 12)} / {commit.message}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </Field>
+                <Button
+                  variant='destructive'
+                  onClick={props.onRollback}
+                  disabled={props.busy === 'rollback' || !canRollback}
+                >
+                  <RotateCcw className='size-4' />
+                  回滚到所选提交
+                </Button>
+              </div>
+            </div>
+
+            <div className='rounded-2xl border bg-background p-4'>
+              <VersionActionTitle
+                icon={GitMerge}
+                title='合并其他分支'
+                description='把来源分支的变更并入当前分支'
               />
-              强制合并冲突
-            </label>
-            <Button variant='outline' onClick={props.onMerge}>
-              <GitMerge className='size-4' />
-              合并
-            </Button>
+              <div className='mt-4 grid gap-3'>
+                <Field label='来源分支'>
+                  <Select
+                    value={props.mergeSource}
+                    onValueChange={props.setMergeSource}
+                  >
+                    <SelectTrigger className='w-full min-w-0 overflow-hidden [&>span]:truncate'>
+                      <SelectValue placeholder='选择一个非当前分支' />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {props.branches
+                        .filter((item) => item.name !== props.currentBranch)
+                        .map((item) => (
+                          <SelectItem key={item.name} value={item.name}>
+                            {item.name}
+                          </SelectItem>
+                        ))}
+                    </SelectContent>
+                  </Select>
+                </Field>
+                <label className='flex items-start gap-2 rounded-xl border bg-muted/20 p-3 text-sm'>
+                  <Checkbox
+                    className='mt-0.5'
+                    checked={props.forceMerge}
+                    onCheckedChange={(checked) =>
+                      props.setForceMerge(Boolean(checked))
+                    }
+                  />
+                  <span>
+                    <span className='font-medium'>强制处理冲突</span>
+                    <span className='block text-xs text-muted-foreground'>
+                      仅在你确认来源分支内容应覆盖冲突时启用。
+                    </span>
+                  </span>
+                </label>
+                <Button
+                  variant='outline'
+                  onClick={props.onMerge}
+                  disabled={props.busy === 'merge' || !canMerge}
+                >
+                  <GitMerge className='size-4' />
+                  合并到 {props.currentBranch}
+                </Button>
+              </div>
+            </div>
           </div>
         </CardContent>
       </Card>
@@ -6459,62 +7139,54 @@ function VersionTab(props: VersionTabProps) {
           </CardContent>
         </Card>
 
-      <div className='grid gap-4 xl:grid-cols-3'>
+      <div className='grid gap-4 xl:grid-cols-[minmax(0,1.4fr)_minmax(320px,0.6fr)]'>
           <Card className='sysml-card'>
             <CardHeader>
-              <CardTitle>标签基线</CardTitle>
-              <CardDescription>{props.tags.length} 个只读快照</CardDescription>
+              <CardTitle>提交记录</CardTitle>
+              <CardDescription>
+                {props.commits.length} 条版本；删除版本只移除历史快照，不删除当前工作区内容
+              </CardDescription>
             </CardHeader>
             <CardContent>
               <ScrollArea className='h-[320px]'>
                 <div className='space-y-3'>
-                  {props.tags.length ? (
-                    props.tags.map((tag) => (
-                      <div key={tag.id} className='rounded-md border p-3'>
-                        <div className='flex items-center justify-between gap-2'>
-                          <div className='font-mono text-sm font-semibold'>
-                            {tag.name}
+                  {props.commits.length ? (
+                    props.commits.map((commit) => (
+                      <div key={commit.id} className='rounded-md border p-3'>
+                        <div className='flex items-start justify-between gap-3'>
+                          <div className='min-w-0'>
+                            <div className='break-all font-mono text-sm font-semibold'>
+                              {commit.id}
+                            </div>
+                            <p className='mt-1 text-sm'>{commit.message}</p>
                           </div>
-                          <Badge variant='secondary'>tag</Badge>
+                          <Button
+                            variant='outline'
+                            size='sm'
+                            className='shrink-0 text-destructive hover:text-destructive'
+                            onClick={() => props.onDeleteCommit(commit.id)}
+                            disabled={props.busy === `delete-commit-${commit.id}`}
+                          >
+                            {props.busy === `delete-commit-${commit.id}` ? (
+                              <Loader2 className='size-4 animate-spin' />
+                            ) : (
+                              <Trash2 className='size-4' />
+                            )}
+                            删除版本
+                          </Button>
                         </div>
                         <p className='mt-1 text-xs text-muted-foreground'>
-                          {tag.commit} / {tag.created_at}
-                        </p>
-                        <p className='mt-1 text-xs text-muted-foreground'>
-                          {tag.element_count ?? '-'} elements / {tag.model_hash || '-'}
+                          {commit.branch} / {commit.author} / {commit.created_at} /{' '}
+                          {commit.element_count} elements
                         </p>
                       </div>
                     ))
                   ) : (
                     <EmptyState
-                      title='暂无标签'
-                      description='创建标签后可在 Diff 中作为只读基线选择'
+                      title='暂无版本'
+                      description='点击“提交当前状态”后会在这里生成版本记录'
                     />
                   )}
-                </div>
-              </ScrollArea>
-            </CardContent>
-          </Card>
-          <Card className='sysml-card'>
-            <CardHeader>
-              <CardTitle>提交记录</CardTitle>
-              <CardDescription>{props.commits.length} 条提交</CardDescription>
-            </CardHeader>
-            <CardContent>
-              <ScrollArea className='h-[320px]'>
-                <div className='space-y-3'>
-                  {props.commits.map((commit) => (
-                    <div key={commit.id} className='rounded-md border p-3'>
-                      <div className='font-mono text-sm font-semibold'>
-                        {commit.id}
-                      </div>
-                      <p className='mt-1 text-sm'>{commit.message}</p>
-                      <p className='mt-1 text-xs text-muted-foreground'>
-                        {commit.branch} / {commit.author} / {commit.created_at} /{' '}
-                        {commit.element_count} elements
-                      </p>
-                    </div>
-                  ))}
                 </div>
               </ScrollArea>
             </CardContent>
@@ -6645,9 +7317,9 @@ function DocgenTab(props: DocgenTabProps) {
         <CardHeader className='bg-muted/20'>
           <div className='flex items-center justify-between gap-3'>
             <div>
-              <CardTitle>{'\u6587\u6863\u9884\u89c8'}</CardTitle>
+              <CardTitle>{props.currentDocument ? '文档预览' : '文档编辑'}</CardTitle>
               <CardDescription>
-                {props.currentDocument?.id || '\u5c1a\u672a\u751f\u6210\u6587\u6863'}
+                {props.currentDocument?.id || '生成前可在这里编辑模板'}
               </CardDescription>
             </div>
             {props.currentDocument && <Badge variant='secondary'>HTML</Badge>}
@@ -6661,8 +7333,22 @@ function DocgenTab(props: DocgenTabProps) {
               className='h-[720px] w-full border-0 bg-background'
             />
           ) : (
-            <div className='h-[720px]'>
-              <EmptyState title={'\u7b49\u5f85\u751f\u6210'} description={'\u70b9\u51fb\u751f\u6210\u6309\u94ae\u9884\u89c8\u6587\u6863'} />
+            <div className='h-[720px] overflow-hidden p-4'>
+              <Suspense
+                fallback={
+                  <div className='flex h-full items-center justify-center rounded-2xl bg-muted/30 text-sm text-muted-foreground'>
+                    <Loader2 className='size-4 animate-spin' />
+                    Loading editor
+                  </div>
+                }
+              >
+                <DocgenTemplateEditor
+                  value={props.template}
+                  onChange={props.setTemplate}
+                  elements={props.elements}
+                  validation={props.validation}
+                />
+              </Suspense>
             </div>
           )}
         </CardContent>
@@ -6765,26 +7451,6 @@ function DocgenTab(props: DocgenTabProps) {
           <CardHeader className='bg-muted/20'>
             <div className='flex items-center justify-between gap-3'>
               <div>
-                <CardTitle>模板编辑</CardTitle>
-                <CardDescription>高级配置，默认不占主屏。</CardDescription>
-              </div>
-              <DocTemplateSheet
-                template={props.template}
-                setTemplate={props.setTemplate}
-                elements={props.elements}
-                validation={props.validation}
-              />
-            </div>
-          </CardHeader>
-          <CardContent className='p-4 text-sm text-muted-foreground'>
-            当前模板通过占位符生成 Requirements、Blocks、Traceability 和 Validation 章节。
-          </CardContent>
-        </Card>
-
-        <Card className='sysml-card overflow-hidden'>
-          <CardHeader className='bg-muted/20'>
-            <div className='flex items-center justify-between gap-3'>
-              <div>
                 <CardTitle>质量审查</CardTitle>
                 <CardDescription>
                   {props.aiDocumentReview?.document_id || '生成或打开文档后可运行质量评分'}
@@ -6822,54 +7488,6 @@ function DocgenTab(props: DocgenTabProps) {
         </Card>
       </div>
     </div>
-  )
-}
-
-function DocTemplateSheet({
-  template,
-  setTemplate,
-  elements,
-  validation,
-}: {
-  template: string
-  setTemplate: (value: string) => void
-  elements: SysmlElement[]
-  validation: ValidationPayload | null
-}) {
-  return (
-    <Sheet>
-      <SheetTrigger asChild>
-        <Button variant='outline' size='sm'>
-          <Code2 className='size-4' />
-          编辑模板
-        </Button>
-      </SheetTrigger>
-      <SheetContent side='left' className='w-[680px] gap-0 sm:max-w-[680px]'>
-        <SheetHeader>
-          <SheetTitle>DocGen 模板</SheetTitle>
-          <SheetDescription>
-            使用占位符生成 HTML / Markdown / PDF。
-          </SheetDescription>
-        </SheetHeader>
-        <div className='min-h-0 flex-1 overflow-auto px-4 pb-4'>
-          <Suspense
-            fallback={
-              <div className='flex h-[420px] items-center justify-center rounded-2xl bg-muted/30 text-sm text-muted-foreground'>
-                <Loader2 className='size-4 animate-spin' />
-                Loading editor
-              </div>
-            }
-          >
-            <DocgenTemplateEditor
-              value={template}
-              onChange={setTemplate}
-              elements={elements}
-              validation={validation}
-            />
-          </Suspense>
-        </div>
-      </SheetContent>
-    </Sheet>
   )
 }
 
@@ -7166,6 +7784,12 @@ function AssistantLoadingBubble() {
 
 function MdkTab(props: MdkTabProps) {
   const selectedAdapter = props.adapters.find((adapter) => adapter.id === props.tool)
+  const modelSourceAdapters = props.adapters.filter(
+    (adapter) => adapter.category !== 'evidence_source'
+  )
+  const evidenceSourceAdapters = props.adapters.filter(
+    (adapter) => adapter.category === 'evidence_source'
+  )
   const report = props.parseResult?.mapping_report
   const canApply = Boolean(props.importJob && props.importJob.status === 'parsed')
   const hasSource = Boolean(props.content.trim())
@@ -7199,7 +7823,7 @@ function MdkTab(props: MdkTabProps) {
               <div>
                 <CardTitle>来源选择</CardTitle>
                 <CardDescription>
-                  选择外部工具格式，再上传或粘贴模型内容。
+                  先区分模型结构来源和验证证据来源，再上传或粘贴内容。
                 </CardDescription>
               </div>
               <Button
@@ -7222,6 +7846,11 @@ function MdkTab(props: MdkTabProps) {
                 <div className='flex items-start justify-between gap-3'>
                   <div>
                     <div className='font-semibold'>{selectedAdapter.label}</div>
+                    {selectedAdapter.description ? (
+                      <p className='mt-1 text-xs text-muted-foreground'>
+                        {selectedAdapter.description}
+                      </p>
+                    ) : null}
                     <p className='mt-1 font-mono text-xs text-muted-foreground'>
                       {selectedAdapter.id} / {selectedAdapter.vendor || 'SysML DocGen'} / v
                       {selectedAdapter.version || '1.0.0'}
@@ -7251,37 +7880,21 @@ function MdkTab(props: MdkTabProps) {
             ) : null}
 
             {props.adapters.length ? (
-              <div className='space-y-1'>
-                <div className='px-1 text-xs font-medium uppercase text-muted-foreground'>
-                  可用适配器
-                </div>
-                {props.adapters.map((adapter) => (
-                  <button
-                    key={adapter.id}
-                    type='button'
-                    onClick={() => props.setTool(adapter.id)}
-                    className={cn(
-                      'relative w-full rounded-2xl p-3 text-left transition-colors hover:bg-muted/55',
-                      props.tool === adapter.id && 'bg-muted'
-                    )}
-                  >
-                    <span
-                      className={cn(
-                        'absolute left-0 top-3 h-8 w-1 rounded-full bg-transparent',
-                        props.tool === adapter.id && 'bg-primary'
-                      )}
-                    />
-                    <div className='flex items-center justify-between gap-3'>
-                      <div className='min-w-0'>
-                        <div className='truncate text-sm font-medium'>{adapter.label}</div>
-                        <div className='truncate font-mono text-xs text-muted-foreground'>
-                          {(adapter.supported_extensions || adapter.formats).join(', ')}
-                        </div>
-                      </div>
-                      <Badge variant='outline'>{adapter.can_write ? '写' : '读'}</Badge>
-                    </div>
-                  </button>
-                ))}
+              <div className='space-y-4'>
+                <MdkAdapterGroup
+                  title='模型来源适配器'
+                  description='建模工具提供需求、结构、接口和关系等模型骨架。'
+                  adapters={modelSourceAdapters}
+                  selectedTool={props.tool}
+                  onSelect={props.setTool}
+                />
+                <MdkAdapterGroup
+                  title='验证证据来源适配器'
+                  description='分析/仿真工具提供测试用例、验证关系和结果证据。'
+                  adapters={evidenceSourceAdapters}
+                  selectedTool={props.tool}
+                  onSelect={props.setTool}
+                />
               </div>
             ) : (
               <EmptyState title='未加载适配器' description='点击刷新读取服务端能力声明' />
@@ -7297,7 +7910,7 @@ function MdkTab(props: MdkTabProps) {
               <div>
                 <CardTitle>外部模型导入向导</CardTitle>
                 <CardDescription>
-                  按步骤完成：选择来源、解析检查、创建任务、确认导入。
+                  MMS 负责集中管理模型、追踪关系、版本和文档生成。
                 </CardDescription>
               </div>
               <MdkStepBar activeStep={activeStep} />
@@ -7310,7 +7923,7 @@ function MdkTab(props: MdkTabProps) {
                   <div>
                     <div className='text-sm font-semibold'>选择文件并解析</div>
                     <p className='mt-1 text-xs text-muted-foreground'>
-                      支持 JSON、XMI、Notebook、MATLAB 标记文件。上传后会自动选择适配器并解析。
+                      支持 JSON、XMI/Cameo 导出、SysML v2/SysON 文本、Notebook 和 MATLAB 证据文件。
                     </p>
                     {props.filename ? (
                       <div className='mt-3 font-mono text-xs text-muted-foreground'>
@@ -7326,7 +7939,7 @@ function MdkTab(props: MdkTabProps) {
                         <input
                           type='file'
                           className='hidden'
-                          accept='.json,.xmi,.xml,.ipynb,.m,.mlx'
+                          accept='.json,.xmi,.xml,.sysml,.kerml,.txt,.ipynb,.m,.mlx'
                           onChange={handleFileChange}
                         />
                       </label>
@@ -7365,7 +7978,7 @@ function MdkTab(props: MdkTabProps) {
                       className='min-h-[260px] font-mono text-xs'
                       value={props.content}
                       onChange={(event) => props.setContent(event.target.value)}
-                      placeholder='粘贴 JSON、XMI、Notebook 或 MATLAB 标记内容'
+                      placeholder='粘贴 JSON、XMI、SysML v2 文本、Notebook 或 MATLAB 标记内容'
                     />
                   </CollapsibleContent>
                 </Collapsible>
@@ -7579,6 +8192,62 @@ function CapabilityBadge({ enabled, label }: { enabled: boolean; label: string }
   )
 }
 
+function MdkAdapterGroup({
+  title,
+  description,
+  adapters,
+  selectedTool,
+  onSelect,
+}: {
+  title: string
+  description: string
+  adapters: MdkAdapter[]
+  selectedTool: string
+  onSelect: (value: string) => void
+}) {
+  if (!adapters.length) return null
+
+  return (
+    <div className='space-y-2'>
+      <div className='px-1'>
+        <div className='text-xs font-medium uppercase text-muted-foreground'>{title}</div>
+        <p className='mt-1 text-xs text-muted-foreground'>{description}</p>
+      </div>
+      <div className='space-y-1'>
+        {adapters.map((adapter) => (
+          <button
+            key={adapter.id}
+            type='button'
+            onClick={() => onSelect(adapter.id)}
+            className={cn(
+              'relative w-full rounded-2xl p-3 text-left transition-colors hover:bg-muted/55',
+              selectedTool === adapter.id && 'bg-muted'
+            )}
+          >
+            <span
+              className={cn(
+                'absolute left-0 top-3 h-8 w-1 rounded-full bg-transparent',
+                selectedTool === adapter.id && 'bg-primary'
+              )}
+            />
+            <div className='flex items-center justify-between gap-3'>
+              <div className='min-w-0'>
+                <div className='truncate text-sm font-medium'>{adapter.label}</div>
+                <div className='truncate font-mono text-xs text-muted-foreground'>
+                  {(adapter.supported_extensions || adapter.formats).join(', ')}
+                </div>
+              </div>
+              <Badge variant='outline'>
+                {adapter.source_kind === 'verification_evidence' ? '证据' : '模型'}
+              </Badge>
+            </div>
+          </button>
+        ))}
+      </div>
+    </div>
+  )
+}
+
 function MdkStepBar({ activeStep }: { activeStep: number }) {
   const steps = ['选择来源', '解析检查', '创建任务', '确认导入']
 
@@ -7672,6 +8341,29 @@ function tabFromHash(hash: string): WorkbenchTab {
   return workbenchTabs.includes(value as WorkbenchTab)
     ? (value as WorkbenchTab)
     : 'model'
+}
+
+function pickInitialProject(projects: Project[], username: string) {
+  if (!projects.length) return null
+  const storedProjectId = window.localStorage.getItem(projectStorageKey)
+  const storedProject = projects.find((project) => project.id === storedProjectId)
+  if (storedProject) return storedProject
+
+  const nonEmptyOwned = projects.find(
+    (project) => project.owner === username && (project.elements || 0) > 0
+  )
+  if (nonEmptyOwned) return nonEmptyOwned
+
+  const nonEmptyAccessible = projects.find((project) => (project.elements || 0) > 0)
+  if (nonEmptyAccessible) return nonEmptyAccessible
+
+  const personalWorkspace = projects.find(
+    (project) =>
+      project.kind === 'workspace' &&
+      project.owner === username &&
+      project.visibility !== 'shared'
+  )
+  return personalWorkspace || projects[0] || null
 }
 
 function EmptyState({
@@ -7880,118 +8572,6 @@ function previewQueryElements(elements: SysmlElement[], query: Record<string, un
   }
 }
 
-function QueryPreviewCard({
-  title,
-  note,
-  query,
-  elements,
-  accent = false,
-  emptyLabel = '未设置自动查询条件',
-  explicitElements,
-}: {
-  title: string
-  note?: string
-  query?: Record<string, unknown>
-  elements: SysmlElement[]
-  accent?: boolean
-  emptyLabel?: string
-  explicitElements?: SysmlElement[]
-}) {
-  const preview = useMemo(() => {
-    if (explicitElements) {
-      return {
-        direct_count: explicitElements.length,
-        match_count: explicitElements.length,
-        matches: explicitElements,
-        types: Array.from(new Set(explicitElements.map((element) => element.type))).sort(),
-        owners: Array.from(
-          new Set(explicitElements.map((element) => element.owner || '').filter(Boolean))
-        ).sort(),
-        relations: Array.from(
-          new Set(
-            explicitElements.flatMap((element) =>
-              (element.relations || []).map((relation) => relation.type)
-            )
-          )
-        ).sort(),
-        keyword: '',
-        depth: 0,
-        has_filters: explicitElements.length > 0,
-      }
-    }
-    return previewQueryElements(elements, query || {})
-  }, [elements, explicitElements, query])
-  const hasContent = preview.has_filters
-
-  return (
-    <div
-      className={cn(
-        'rounded-md border bg-background p-4',
-        accent && 'border-primary bg-primary/5'
-      )}
-    >
-      <div className='flex items-start justify-between gap-3'>
-        <div>
-          <div className='text-sm font-semibold'>{title}</div>
-          <p className='text-xs text-muted-foreground'>
-            {note || (hasContent ? '条件会按这些字段组合匹配元素。' : emptyLabel)}
-          </p>
-        </div>
-        <Badge variant={accent ? 'default' : 'outline'}>
-          {preview.match_count} 命中
-        </Badge>
-      </div>
-      {hasContent ? (
-        <div className='mt-3 space-y-3'>
-          <div className='flex flex-wrap gap-2'>
-            <PreviewToken label='类型' values={preview.types.map(labelType)} />
-            <PreviewToken label='负责人' values={preview.owners} />
-            <PreviewToken label='关系' values={preview.relations.map(labelRelation)} />
-          </div>
-          <div className='flex flex-wrap items-center gap-2 text-xs text-muted-foreground'>
-            <span>关键词：{preview.keyword || '无'}</span>
-            <span>深度：{preview.depth}</span>
-            <span>直接命中：{preview.direct_count}</span>
-          </div>
-          <div className='flex flex-wrap gap-2'>
-            {preview.matches.slice(0, 4).map((element) => (
-              <Badge key={element.id} variant='secondary' className='font-normal'>
-                {element.id}
-              </Badge>
-            ))}
-            {preview.matches.length > 4 && (
-              <Badge variant='outline' className='font-normal'>
-                +{preview.matches.length - 4}
-              </Badge>
-            )}
-          </div>
-        </div>
-      ) : (
-        <div className='mt-3 rounded-md border border-dashed bg-muted/20 p-3 text-xs text-muted-foreground'>
-          这条查询还没设置任何条件，保存后 View 会主要依赖手动绑定元素。
-        </div>
-      )}
-    </div>
-  )
-}
-
-function PreviewToken({ label, values }: { label: string; values: string[] }) {
-  return (
-    <div className='flex flex-wrap items-center gap-2 rounded-md border bg-muted/20 px-3 py-2 text-xs'>
-      <span className='font-medium text-muted-foreground'>{label}</span>
-      {values.length ? (
-        values.map((value) => (
-          <Badge key={`${label}-${value}`} variant='secondary' className='font-normal'>
-            {value}
-          </Badge>
-        ))
-      ) : (
-        <span className='text-muted-foreground'>未限制</span>
-      )}
-    </div>
-  )
-}
-
 function parseJson<T>(value: string, label: string, fallback: T): T {
   try {
     return (value.trim() ? JSON.parse(value) : fallback) as T
@@ -8006,6 +8586,29 @@ function parseJsonSafe<T>(value: string, fallback: T): T {
   } catch {
     return fallback
   }
+}
+
+function memberNames(value: string) {
+  return value
+    .split(/[,\n;]+/)
+    .map((item) => item.trim())
+    .filter(Boolean)
+}
+
+function buildProjectMembers(editorMembers: string, viewerMembers: string) {
+  return [
+    ...memberNames(editorMembers).map((username) => `${username}:editor`),
+    ...memberNames(viewerMembers).map((username) => `${username}:viewer`),
+  ].join(', ')
+}
+
+function membersByRole(project: Project, role: 'editor' | 'viewer') {
+  return (
+    project.members
+      ?.filter((member) => member.role === role)
+      .map((member) => member.username)
+      .join(', ') || ''
+  )
 }
 
 function notifyError(error: unknown) {

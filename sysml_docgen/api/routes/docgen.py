@@ -75,6 +75,28 @@ async def ai_requirement_closure_suggestions(
     return await service.suggest_requirement_closure(project_id, branch, payload)
 
 
+@router.post("/api/projects/{project_id}/branches/{branch}/ve/ai-validation-fix", tags=["VE", "AI"])
+async def ai_validation_fix_suggestions(
+    project_id: str,
+    branch: str,
+    payload: dict[str, Any],
+    _: dict[str, str] = Depends(authorize_read),
+    service: AiDocgenService = Depends(get_ai_docgen_service),
+) -> dict[str, Any]:
+    return await service.suggest_validation_fixes(project_id, branch, payload)
+
+
+@router.post("/api/projects/{project_id}/branches/{branch}/ve/ai-validation-fix/apply", tags=["VE", "AI"])
+async def apply_ai_validation_fixes(
+    project_id: str,
+    branch: str,
+    payload: dict[str, Any],
+    identity: dict[str, str] = Depends(authorize_write),
+    service: AiDocgenService = Depends(get_ai_docgen_service),
+) -> dict[str, Any]:
+    return service.apply_validation_fixes(project_id, branch, identity["username"])
+
+
 @router.post("/api/projects/{project_id}/branches/{branch}/ai/chat", tags=["VE", "AI"])
 async def ai_model_chat(
     project_id: str,

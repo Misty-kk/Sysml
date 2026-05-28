@@ -11,3 +11,6 @@ outputs/
 .tmp-shadcn-admin/
 frontend/node_modules/
 frontend/dist/
+site/
+tools/docx-gen/node_modules/
+~$*.docx

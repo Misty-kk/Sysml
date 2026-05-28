@@ -25,8 +25,13 @@ def normalize_members(members: Any, owner: str) -> list[dict[str, str]]:
             username = str(member.get("username", "")).strip()
             role = str(member.get("role", "editor")).strip().lower() or "editor"
         else:
-            username = str(member).strip()
-            role = "editor"
+            raw_member = str(member).strip()
+            username, separator, raw_role = raw_member.partition(":")
+            if not separator:
+                username, separator, raw_role = raw_member.partition("=")
+            username = username.strip()
+            role = raw_role.strip().lower() if separator else "editor"
+            role = role or "editor"
         if not username or username in seen:
             continue
         if role not in {"owner", "editor", "viewer"}:
@@ -34,6 +39,19 @@ def normalize_members(members: Any, owner: str) -> list[dict[str, str]]:
         result.append({"username": username, "role": role})
         seen.add(username)
     return result
+
+
+def ensure_known_members(self: ModelStore, members: list[dict[str, str]], owner: str) -> None:
+    missing = []
+    for member in members:
+        username = str(member.get("username", "")).strip()
+        if not username or username == owner:
+            continue
+        if not self.get_user(username):
+            missing.append(username)
+    if missing:
+        unique_missing = ", ".join(sorted(set(missing)))
+        raise ForbiddenError(f"成员不存在，请先注册用户：{unique_missing}")
 
 
 def project_access_role(project: dict[str, Any], username: str) -> str:
@@ -90,13 +108,32 @@ def project_summary(project: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def ensure_main_branch(project: dict[str, Any]) -> None:
+    branches = project.setdefault("branches", {})
+    if "main" in branches:
+        branch = branches["main"]
+        branch.setdefault("name", "main")
+        branch.setdefault("head", "")
+        branch.setdefault("elements", {})
+        branch.setdefault("documents", [])
+        branch.setdefault("created_at", project.get("created_at", utc_now()))
+        return
+    branches["main"] = {
+        "name": "main",
+        "head": "",
+        "elements": {},
+        "documents": [],
+        "created_at": project.get("created_at", utc_now()),
+    }
+
+
 def enforce_role(method: str, role: str) -> None:
     normalized = (role or "").strip().lower()
     if not normalized:
         raise ForbiddenError("请先登录")
-    if normalized in {"user", "owner", "editor"}:
+    if normalized in {"user", "owner", "editor", "admin", "author"}:
         return
-    if normalized == "viewer":
+    if normalized in {"viewer", "reader"}:
         if method in {"GET", "HEAD", "OPTIONS"}:
             return
         raise ForbiddenError("当前空间只有只读权限")
@@ -110,6 +147,7 @@ def ensure_user_workspace(self: ModelStore, username: str) -> dict[str, Any]:
     project_id = f"workspace-{owner}"
     existing = self.data.setdefault("projects", {}).get(project_id)
     if existing:
+        ensure_main_branch(existing)
         existing["owner"] = username
         existing["visibility"] = "private"
         existing["kind"] = "workspace"
@@ -166,12 +204,49 @@ def list_projects(self: ModelStore, username: str | None = None) -> list[dict[st
     if username:
         self.ensure_user_workspace(username)
     projects = list(self.data.get("projects", {}).values())
+    changed = False
+    for project in projects:
+        before = set((project.get("branches") or {}).keys())
+        ensure_main_branch(project)
+        changed = changed or before != set(project.get("branches", {}).keys())
+    if changed:
+        self.save()
     if username:
-        projects = [project for project in projects if project_access_role(project, username)]
+        projects = [
+            project
+            for project in projects
+            if project_access_role(project, username)
+            and not (
+                str(project.get("id", "")).endswith("-sample")
+                and project.get("owner") == username
+            )
+        ]
     return sorted(
         [project_summary(project) for project in projects],
-        key=lambda item: (0 if item.get("kind") == "workspace" else 1, item["id"]),
+        key=lambda item: (
+            0 if int(item.get("elements") or 0) > 0 else 1,
+            0 if item.get("kind") == "workspace" else 1,
+            item["id"],
+        ),
     )
+
+
+def list_branches(self: ModelStore, project_id: str) -> list[dict[str, Any]]:
+    project = self.get_project(project_id)
+    before = set((project.get("branches") or {}).keys())
+    ensure_main_branch(project)
+    if before != set(project.get("branches", {}).keys()):
+        self.save()
+    return [
+        {
+            "name": branch["name"],
+            "head": branch.get("head", ""),
+            "elements": len(branch.get("elements", {})),
+            "documents": len(branch.get("documents", [])),
+            "created_at": branch.get("created_at", ""),
+        }
+        for branch in project.get("branches", {}).values()
+    ]
 
 
 def create_project(self: ModelStore, payload: dict[str, Any], actor: str = "engineer") -> dict[str, Any]:
@@ -180,6 +255,7 @@ def create_project(self: ModelStore, payload: dict[str, Any], actor: str = "engi
         raise ConflictError(f"项目 {project_id} 已存在")
     now = utc_now()
     members = normalize_members(payload.get("members"), actor)
+    ensure_known_members(self, members, actor)
     project = {
         "id": project_id,
         "name": payload.get("name") or project_id,
@@ -222,12 +298,29 @@ def publish_project(
     self: ModelStore, project_id: str, payload: dict[str, Any], actor: str
 ) -> dict[str, Any]:
     source = self.get_project(project_id)
+    ensure_main_branch(source)
     if source.get("owner") != actor:
         raise ForbiddenError("Only the owner can publish a shared project")
-    shared_id = slugify(payload.get("id") or payload.get("name") or f"{project_id}-shared")
-    if shared_id in self.data.setdefault("projects", {}):
-        raise ConflictError(f"项目 {shared_id} 已存在")
     now = utc_now()
+    projects = self.data.setdefault("projects", {})
+    existing_shared = max(
+        [
+            project
+            for project in projects.values()
+            if project.get("visibility") == "shared"
+            and project.get("published_from") == project_id
+            and project.get("owner") == actor
+        ],
+        key=lambda project: project.get("updated_at", ""),
+        default=None,
+    )
+    shared_id = (
+        existing_shared.get("id")
+        if existing_shared
+        else slugify(payload.get("id") or payload.get("name") or f"{project_id}-shared")
+    )
+    if not existing_shared and shared_id in projects:
+        raise ConflictError(f"项目 {shared_id} 已存在")
     published = copy.deepcopy(source)
     published["id"] = shared_id
     published["name"] = payload.get("name") or f"{source.get('name', project_id)}（共享）"
@@ -236,7 +329,9 @@ def publish_project(
     published["visibility"] = "shared"
     published["kind"] = "shared"
     published["owner"] = actor
-    published["members"] = normalize_members(payload.get("members"), actor)
+    members = normalize_members(payload.get("members"), actor)
+    ensure_known_members(self, members, actor)
+    published["members"] = members
     published["source_project_id"] = project_id
     published["published_from"] = project_id
     published["published_by"] = actor
@@ -244,13 +339,45 @@ def publish_project(
     published["copied_from"] = ""
     published["copied_by"] = ""
     published["copied_at"] = ""
-    published["created_at"] = now
+    published["created_at"] = existing_shared.get("created_at", now) if existing_shared else now
     published["updated_at"] = now
-    self.data["projects"][shared_id] = published
+    projects[shared_id] = published
     self.save()
     self.record_audit(project_id, "main", "publish_project", actor, detail={"target": shared_id})
-    self.record_audit(shared_id, "main", "create_shared_project", actor, detail={"source": project_id})
+    self.record_audit(
+        shared_id,
+        "main",
+        "update_shared_project" if existing_shared else "create_shared_project",
+        actor,
+        detail={"source": project_id},
+    )
     return copy.deepcopy(published)
+
+
+def delete_project(self: ModelStore, project_id: str, actor: str) -> dict[str, str]:
+    project = self.get_project(project_id)
+    if project.get("owner") != actor:
+        raise ForbiddenError("Only the owner can delete this project")
+    if project.get("kind") == "workspace" and project.get("owner") == actor:
+        raise ForbiddenError("Personal workspace cannot be deleted")
+    del self.data.setdefault("projects", {})[project_id]
+    self.save()
+    return {"deleted": project_id}
+
+
+def update_project_members(self: ModelStore, project_id: str, payload: dict[str, Any], actor: str) -> dict[str, Any]:
+    project = self.get_project(project_id)
+    if project.get("owner") != actor:
+        raise ForbiddenError("Only the owner can manage project members")
+    if project.get("kind") == "workspace":
+        raise ForbiddenError("Personal workspace members cannot be changed")
+    members = normalize_members(payload.get("members"), actor)
+    ensure_known_members(self, members, actor)
+    project["members"] = members
+    project["updated_at"] = utc_now()
+    self.save()
+    self.record_audit(project_id, "main", "update_members", actor, detail={"members": members})
+    return copy.deepcopy(project)
 
 
 def copy_shared_project(
@@ -293,8 +420,11 @@ def copy_shared_project(
 ModelStore.ensure_user_workspace = ensure_user_workspace
 ModelStore.ensure_user_sample_project = ensure_user_workspace
 ModelStore.list_projects = list_projects
+ModelStore.list_branches = list_branches
 ModelStore.create_project = create_project
 ModelStore.publish_project = publish_project
+ModelStore.delete_project = delete_project
+ModelStore.update_project_members = update_project_members
 ModelStore.copy_shared_project = copy_shared_project
 store_module.normalize_members = normalize_members
 store_module.project_access_role = project_access_role

@@ -53,6 +53,25 @@ async def copy_shared_project(
     return {"project": service.copy_shared_project(project_id, payload or {}, identity["username"])}
 
 
+@router.delete("/api/projects/{project_id}", tags=["MMS"])
+async def delete_project(
+    project_id: str,
+    identity: dict[str, str] = Depends(authorize_write),
+    service: MmsService = Depends(get_mms_service),
+) -> dict[str, str]:
+    return service.delete_project(project_id, identity["username"])
+
+
+@router.put("/api/projects/{project_id}/members", tags=["MMS"])
+async def update_project_members(
+    project_id: str,
+    payload: dict[str, Any],
+    identity: dict[str, str] = Depends(authorize_write),
+    service: MmsService = Depends(get_mms_service),
+) -> dict[str, Any]:
+    return {"project": service.update_project_members(project_id, payload, identity["username"])}
+
+
 @router.get("/api/projects/{project_id}", tags=["MMS"])
 async def get_project(
     project_id: str,
@@ -167,6 +186,16 @@ async def list_commits(
     service: MmsService = Depends(get_mms_service),
 ) -> dict[str, Any]:
     return {"commits": service.list_commits(project_id)}
+
+
+@router.delete("/api/projects/{project_id}/commits/{commit_id}", tags=["MMS"])
+async def delete_commit(
+    project_id: str,
+    commit_id: str,
+    identity: dict[str, str] = Depends(authorize_write),
+    service: MmsService = Depends(get_mms_service),
+) -> dict[str, Any]:
+    return service.delete_commit(project_id, commit_id, identity["username"])
 
 
 @router.get("/api/projects/{project_id}/branches/{branch}/diff", tags=["MMS"])

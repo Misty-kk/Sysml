@@ -1,4 +1,4 @@
-"""Adapter registry for external engineering tool model exchange."""
+"""Adapter registry for external engineering model and evidence exchange."""
 
 from __future__ import annotations
 
@@ -6,11 +6,20 @@ import json
 from pathlib import Path
 from typing import Any, Protocol
 
+from ..metamodel import default_stereotype
 from ..xmi import parse_xmi_with_report
 from .types import AdapterCapabilities, AdapterParseResult, MappingReport
 
 
-SUPPORTED_TOOLS = {"auto", "json", "xmi", "cameo", "jupyter", "matlab"}
+SUPPORTED_TOOLS = {"auto", "json", "xmi", "cameo", "magicdraw", "sysmlv2", "syson", "jupyter", "matlab"}
+TOOL_ALIASES = {
+    "cameo": "xmi",
+    "magicdraw": "xmi",
+    "sysml-v2": "sysmlv2",
+    "sysml_v2": "sysmlv2",
+    "sysml2": "sysmlv2",
+    "syson": "sysmlv2",
+}
 
 
 class AdapterError(RuntimeError):
@@ -63,8 +72,11 @@ class BaseAdapter:
 
 class JsonAdapter(BaseAdapter):
     id = "json"
-    label = "Generic JSON model"
+    label = "SysML JSON Exchange"
     capabilities = AdapterCapabilities(
+        category="model_source",
+        source_kind="model",
+        description="Structured SysML model exchange from this system or external tools.",
         can_read=True,
         can_write=True,
         can_validate=True,
@@ -91,18 +103,25 @@ class JsonAdapter(BaseAdapter):
 
 class XmiAdapter(BaseAdapter):
     id = "xmi"
-    label = "Generic XMI"
+    label = "XMI / Cameo Export"
     capabilities = AdapterCapabilities(
+        category="model_source",
+        source_kind="model",
+        description="Standard XMI import, including XMI files exported from Cameo/MagicDraw.",
         can_read=True,
         can_write=True,
         can_validate=True,
         can_commit=True,
         can_rollback=False,
         formats=("xmi", "xml"),
+        vendor="OMG XMI / Cameo Export",
         supported_extensions=(".xmi", ".xml"),
         input_mime_types=("application/xml", "text/xml"),
         output_formats=("xmi", "xml", "json"),
-        limitations=("Parses a pragmatic UML/XMI subset and preserves unsupported data as tagged values when possible.",),
+        limitations=(
+            "Parses a pragmatic UML/XMI subset and preserves unsupported data as tagged values when possible.",
+            "Cameo/MagicDraw support is file-level XMI import; native .mdzip parsing and live plugin sync are future extensions.",
+        ),
     )
 
     def matches(self, path: Path, requested: str = "auto") -> bool:
@@ -117,34 +136,43 @@ class XmiAdapter(BaseAdapter):
         return result
 
 
-class CameoAdapter(XmiAdapter):
-    id = "cameo"
-    label = "Cameo Systems Modeler XMI"
+class SysmlV2TextAdapter(BaseAdapter):
+    id = "sysmlv2"
+    label = "SysML v2 Text / SysON"
     capabilities = AdapterCapabilities(
+        category="model_source",
+        source_kind="model",
+        description="Textual SysML v2 model import for open-source SysML v2 tooling such as SysON.",
         can_read=True,
         can_write=False,
         can_validate=True,
         can_commit=True,
         can_rollback=False,
-        formats=("xmi", "xml"),
-        vendor="Dassault Systemes",
-        supported_extensions=(".xmi", ".xml"),
-        input_mime_types=("application/xml", "text/xml"),
+        formats=("sysml", "kerml", "txt"),
+        vendor="SysML v2 / SysON",
+        supported_extensions=(".sysml", ".kerml", ".txt"),
+        input_mime_types=("text/plain",),
         output_formats=("json",),
         limitations=(
-            "Native .mdzip parsing is not supported; export XMI from Cameo first.",
-            "Some Cameo profiles may be downgraded to attributes or mapping report warnings.",
+            "Imports a lightweight textual subset: requirement, part/block, interface, action, state, constraint, testcase, and relation statements.",
+            "Full SysML v2/KerML semantic resolution is not implemented in this prototype.",
         ),
     )
 
     def matches(self, path: Path, requested: str = "auto") -> bool:
-        return requested == self.id or (requested == "auto" and path.suffix.lower() in {".xmi", ".xml"})
+        return requested == self.id or (requested == "auto" and path.suffix.lower() in {".sysml", ".kerml"})
+
+    def parse_content(self, content: Any, filename: str = "") -> AdapterParseResult:
+        return parse_sysmlv2_text(str(content), self.id, filename)
 
 
 class JupyterAdapter(BaseAdapter):
     id = "jupyter"
-    label = "Jupyter Notebook"
+    label = "Jupyter Analysis Evidence"
     capabilities = AdapterCapabilities(
+        category="evidence_source",
+        source_kind="verification_evidence",
+        description="Notebook-based analysis results, validation relations, and requirement verification evidence.",
         can_read=True,
         can_write=False,
         can_validate=True,
@@ -155,7 +183,7 @@ class JupyterAdapter(BaseAdapter):
         supported_extensions=(".ipynb",),
         input_mime_types=("application/x-ipynb+json", "application/json"),
         output_formats=("json",),
-        limitations=("Only metadata and sysml-docgen comment blocks are imported.",),
+        limitations=("Only metadata and sysml-docgen comment blocks are imported; this is not a full JupyterLab plugin.",),
     )
 
     def matches(self, path: Path, requested: str = "auto") -> bool:
@@ -176,8 +204,11 @@ class JupyterAdapter(BaseAdapter):
 
 class MatlabAdapter(BaseAdapter):
     id = "matlab"
-    label = "MATLAB script"
+    label = "MATLAB Simulation Evidence"
     capabilities = AdapterCapabilities(
+        category="evidence_source",
+        source_kind="verification_evidence",
+        description="MATLAB simulation results, test cases, and verification evidence.",
         can_read=True,
         can_write=False,
         can_validate=True,
@@ -188,7 +219,7 @@ class MatlabAdapter(BaseAdapter):
         supported_extensions=(".m", ".mlx"),
         input_mime_types=("text/x-matlab", "text/plain"),
         output_formats=("json",),
-        limitations=("Only sysml-docgen comment blocks are imported from MATLAB files.",),
+        limitations=("Only sysml-docgen comment blocks are imported from MATLAB files; this is not a full MATLAB toolbox plugin.",),
     )
 
     def matches(self, path: Path, requested: str = "auto") -> bool:
@@ -200,8 +231,8 @@ class MatlabAdapter(BaseAdapter):
 
 ADAPTERS: tuple[ToolAdapter, ...] = (
     JsonAdapter(),
-    CameoAdapter(),
     XmiAdapter(),
+    SysmlV2TextAdapter(),
     JupyterAdapter(),
     MatlabAdapter(),
 )
@@ -212,6 +243,7 @@ def list_adapters() -> list[dict[str, Any]]:
 
 
 def get_adapter(adapter_id: str) -> ToolAdapter:
+    adapter_id = normalize_tool_id(adapter_id)
     for adapter in ADAPTERS:
         if adapter.id == adapter_id:
             return adapter
@@ -220,8 +252,9 @@ def get_adapter(adapter_id: str) -> ToolAdapter:
 
 
 def select_adapter(path: Path, requested: str = "auto") -> ToolAdapter:
-    requested = requested.lower()
-    if requested not in SUPPORTED_TOOLS:
+    original_requested = requested.lower()
+    requested = normalize_tool_id(original_requested)
+    if requested not in {normalize_tool_id(tool) for tool in SUPPORTED_TOOLS}:
         supported = ", ".join(sorted(SUPPORTED_TOOLS))
         raise AdapterError(f"tool must be one of: {supported}")
     if requested != "auto":
@@ -249,6 +282,7 @@ def load_model_file(file_path: str | Path, tool: str = "auto") -> dict[str, Any]
 
 
 def parse_content(content: Any, filename: str = "", tool: str = "auto") -> AdapterParseResult:
+    tool = normalize_tool_id(tool.lower()) if tool else "auto"
     if tool and tool != "auto":
         adapter = get_adapter(tool.lower())
     elif filename:
@@ -256,6 +290,10 @@ def parse_content(content: Any, filename: str = "", tool: str = "auto") -> Adapt
     else:
         adapter = get_adapter("json")
     return adapter.parse_content(content, filename)
+
+
+def normalize_tool_id(tool: str) -> str:
+    return TOOL_ALIASES.get((tool or "auto").lower(), (tool or "auto").lower())
 
 
 def normalize_elements(payload: Any) -> list[dict[str, Any]]:
@@ -318,6 +356,139 @@ def model_from_elements(elements: list[dict[str, Any]], tool: str, source_file: 
     if source_file:
         model["source"]["file"] = source_file
     return AdapterParseResult(model, report)
+
+
+SYSMLV2_TYPES = {
+    "requirement": "Requirement",
+    "req": "Requirement",
+    "part": "Block",
+    "partdef": "Block",
+    "block": "Block",
+    "item": "Block",
+    "interface": "Interface",
+    "interfaceblock": "Interface",
+    "port": "Port",
+    "constraint": "Constraint",
+    "constraintdef": "Constraint",
+    "action": "Activity",
+    "actiondef": "Activity",
+    "state": "State",
+    "statedef": "State",
+    "testcase": "TestCase",
+    "test": "TestCase",
+    "view": "View",
+}
+
+SYSMLV2_RELATIONS = {
+    "satisfy",
+    "satisfies",
+    "verify",
+    "verifies",
+    "refine",
+    "refines",
+    "trace",
+    "derive",
+    "allocate",
+    "connect",
+    "constrain",
+}
+
+RELATION_ALIASES = {
+    "satisfies": "satisfy",
+    "verifies": "verify",
+    "refines": "refine",
+}
+
+
+def parse_sysmlv2_text(content: str, adapter: str, filename: str = "") -> AdapterParseResult:
+    elements: dict[str, dict[str, Any]] = {}
+    report = MappingReport(adapter=adapter)
+
+    for line_number, raw_line in enumerate(content.splitlines(), start=1):
+        line = raw_line.split("//", 1)[0].strip().rstrip(";")
+        if not line or line in {"}", "{"}:
+            continue
+        normalized = " ".join(line.replace("{", " ").replace("}", " ").split())
+        tokens = normalized.split()
+        if not tokens:
+            continue
+
+        keyword = tokens[0].replace(" ", "").replace("-", "").lower()
+        element_type = SYSMLV2_TYPES.get(keyword)
+        if element_type:
+            element_id = _clean_sysmlv2_identifier(tokens[1] if len(tokens) > 1 else f"{element_type}-{line_number}")
+            name = _quoted_text(normalized) or element_id
+            elements[element_id] = {
+                "id": element_id,
+                "name": name,
+                "type": element_type,
+                "stereotype": default_stereotype(element_type),
+                "description": "",
+                "owner": "",
+                "attributes": {"source_line": str(line_number), "source_syntax": "SysML v2 text"},
+                "relations": [],
+            }
+            continue
+
+        relation_keyword = RELATION_ALIASES.get(keyword, keyword)
+        if relation_keyword in SYSMLV2_RELATIONS and len(tokens) >= 3:
+            source = _clean_sysmlv2_identifier(tokens[1])
+            target = _clean_sysmlv2_identifier(tokens[-1])
+            elements.setdefault(source, _placeholder_sysmlv2_element(source, line_number))
+            elements[source].setdefault("relations", []).append({"type": relation_keyword, "target": target})
+            report.converted.append(
+                {
+                    "source": source,
+                    "to": relation_keyword,
+                    "target": target,
+                    "reason": "textual relation statement mapped to repository relation",
+                }
+            )
+            continue
+
+        report.skipped.append({"line": line_number, "text": raw_line.strip(), "reason": "unsupported SysML v2 text subset"})
+
+    report.imported = len(elements)
+    if report.skipped:
+        report.warnings.append("Some SysML v2 text lines were outside the lightweight import subset.")
+    model = {
+        "format": "sysmlv2-text",
+        "elements": list(elements.values()),
+        "source": {"adapter": adapter, "tool": "syson"},
+        "mapping_report": report.to_dict(),
+    }
+    if filename:
+        model["source"]["file"] = filename
+    return AdapterParseResult(model, report)
+
+
+def _clean_sysmlv2_identifier(value: str) -> str:
+    cleaned = value.strip().strip("'\"").rstrip(":;,{")
+    return cleaned.lstrip("#")
+
+
+def _quoted_text(value: str) -> str:
+    if '"' not in value:
+        return ""
+    parts = value.split('"')
+    return parts[1].strip() if len(parts) >= 3 else ""
+
+
+def _placeholder_sysmlv2_element(element_id: str, line_number: int) -> dict[str, Any]:
+    return {
+        "id": element_id,
+        "name": element_id,
+        "type": "Block",
+        "stereotype": default_stereotype("Block"),
+        "description": "",
+        "owner": "",
+        "attributes": {
+            "source_line": str(line_number),
+            "source_syntax": "SysML v2 text",
+            "placeholder": "true",
+        },
+        "relations": [],
+    }
 
 
 def dedupe_elements(elements: list[dict[str, Any]]) -> list[dict[str, Any]]:

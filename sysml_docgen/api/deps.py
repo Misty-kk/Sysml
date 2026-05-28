@@ -10,7 +10,7 @@ from ..auth import identity_from_headers
 from ..services.docgen_service import DocgenService
 from ..services.ai_service import AiDocgenService
 from ..services.integration_service import IntegrationService
-from ..services.mms_service import MmsService
+from ..services.mms_service import MmsService, effective_project_role, project_id_from_path
 from ..repository import enforce_role
 
 
@@ -59,10 +59,20 @@ async def read_identity(
 
 
 async def authorize_read(request: Request, identity: dict[str, str] = Depends(read_identity)) -> dict[str, str]:
-    enforce_role(request.method, identity["role"])
+    role = identity["role"]
+    project_id = project_id_from_path(request.url.path)
+    if project_id:
+        project = request.app.state.store.get_project(project_id)
+        role = effective_project_role(project, identity)
+    enforce_role(request.method, role)
     return identity
 
 
 async def authorize_write(request: Request, identity: dict[str, str] = Depends(read_identity)) -> dict[str, str]:
-    enforce_role(request.method, identity["role"])
+    role = identity["role"]
+    project_id = project_id_from_path(request.url.path)
+    if project_id:
+        project = request.app.state.store.get_project(project_id)
+        role = effective_project_role(project, identity)
+    enforce_role(request.method, role)
     return identity
