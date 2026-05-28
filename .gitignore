@@ -1,5 +1,12 @@
 __pycache__/
 *.pyc
+.venv/
+.venv-*/
+.claude/
+.vscode/
+.codex-log-backup-*/
+.github/java-upgrade/
+.server-*.log
 server.out.log
 server.err.log
 server-*.log
@@ -11,6 +18,10 @@ outputs/
 .tmp-shadcn-admin/
 frontend/node_modules/
 frontend/dist/
+static/
 site/
 tools/docx-gen/node_modules/
 ~$*.docx
+sysml_docgen.egg-info/
+/package-lock.json
+CLAUDE.md

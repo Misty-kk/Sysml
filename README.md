@@ -1,96 +1,76 @@
 # 基于 SysML 模型的文档自动生成系统
 
-本项目是一个课程设计级 MBSE 原型，用于演示如何以 SysML 风格模型作为单一可信源，自动生成一致、可追溯的工程文档。系统围绕 MMS、VE、MDK、DocGen 四个组件组织，实现“模型一次编辑，文档处处复用”的闭环。
+## 项目简介
 
-## 核心功能
+本项目是一个基于 SysML 模型的文档自动生成系统，目标是通过基于模型的系统工程方法解决传统系统工程中的信息孤岛、重复录入、模型与文档不一致等问题。系统将 SysML 风格模型作为单一可信源，集中管理模型结构、验证证据、追踪关系、版本历史和工程文档，使工程师能够在统一环境中完成建模、分析、验证和文档生成。
 
-- `MMS` 模型管理：项目、分支、元素 CRUD、提交快照、标签、差异比较、回滚、合并、审计日志。
-- `VE` 视图编辑器：浏览器内查看和编辑 SysML 元素，展示需求图、结构图、行为图和追踪矩阵。
-- `MDK` 工具集成：提供可复用 Python 客户端和命令行入口，按“模型来源”和“验证证据来源”组织 JSON、XMI/Cameo Export、SysML v2/SysON、Jupyter、MATLAB 适配器。
-- `DocGen` 文档生成：按模板生成 Markdown、HTML、PDF，并写入模型指纹、来源分支、来源提交和追踪矩阵。
-- 账号隔离：演示账号统一为普通用户；每个用户登录后只看到并操作自己的独立示例项目。
+传统系统工程实践通常以 Word、Excel、建模工具和仿真脚本等分散文件为中心。模型数据和叙述性文档容易脱节，需求、结构、接口、验证结果和设计说明需要在多个文件之间重复维护，导致协作成本高、错误风险大、版本一致性难以保证。本系统采用“一次编辑，处处使用”的理念，将文档中心流程升级为模型中心流程：模型元素和验证证据统一进入 MMS，由文档生成模块按模板自动生成 Markdown、HTML、PDF 和 Word 文档，并保留模型指纹、来源分支、来源提交和追踪矩阵。
 
-## 快速运行
+## 项目目标
 
-```powershell
-pip install -r requirements.txt
-cd frontend
-npm install
-npm run build
-cd ..
-python server.py --host 127.0.0.1 --port 8000
-```
+- 提供一个模型驱动的文档自动生成环境，使工程文档能够从模型数据动态生成。
+- 建立统一的模型管理服务，集中存储 SysML 风格模型元素、关系、分支、提交和审计记录。
+- 支持浏览器中的模型查看、编辑、追踪和文档生成，使非专业建模人员也能参与评审。
+- 支持外部工具接入，将建模工具、分析工具和仿真工具产生的数据纳入统一模型仓库。
+- 保证需求、设计、验证证据和文档之间的可追溯性，降低重复维护和信息不一致风险。
 
-If `frontend/dist` is missing, the service now returns a clear error instead of silently falling back to the legacy `static/` frontend.
+## 系统组成
 
-## 文档
+### 1. MMS 模型管理功能
 
-- [用户手册](docs/user-manual.md) — 面向最终用户的完整操作指南
-- [API 文档](docs/api.md) — REST API 接口说明
-- [MDK 集成](docs/mdk.md) — 外部工具集成指南
-- [后端重构记录](docs/backend-refactor-notes.md) — 后端分层重构说明
+MMS（Model Management System）是系统的核心，负责作为模型的单一可信源。它通过 RESTful API 提供模型仓库的创建、读取、更新、删除、分支、提交、差异比较、回滚、合并和审计能力。
 
-打开：
+当前实现支持：
 
-```text
-http://127.0.0.1:8000
-```
+- 项目和分支管理
+- SysML 风格模型元素 CRUD
+- 模型关系维护和语义校验
+- 提交快照、Diff、Rollback、Merge
+- 模型导入导出
+- 审计日志和版本追踪
+- 基于用户工作区的演示级隔离
 
-OpenAPI 文档：
+### 2. VE 视图编辑器
 
-```text
-http://127.0.0.1:8000/docs
-```
+VE（View Editor）是基于 Web 的交互式模型工作台。用户无需打开专业建模软件，即可在浏览器中查看、筛选、编辑模型元素，并通过视图、图谱和追踪矩阵理解模型之间的关系。
 
-演示账号：
+当前前端工作台包括：
 
-| 用户 | 密码 | 角色 |
-| --- | --- | --- |
-| `teacher` | `teacher123` | 私有示例项目 |
-| `engineer` | `engineer123` | 私有示例项目 |
-| `reviewer` | `reviewer123` | 私有示例项目 |
+- 项目总览
+- 模型工作台
+- View / Viewpoint 管理
+- 关系图谱
+- 需求追踪矩阵
+- 版本管理
+- 文档生成
+- 外部导入
 
-说明：系统已取消 `admin` / `author` / `reader` 三种演示角色。所有账号都是普通用户，登录后只看到并操作自己的独立示例数据。
+### 3. MDK 模型开发工具包
 
-## 典型流程
-
-1. 使用 `engineer / engineer123` 登录 VE。
-2. 在“模型仓库”中创建或修改 Requirement、Block、Interface、Port、Constraint、Activity、State、TestCase。
-3. 在“图形建模”中查看关系图，或添加 `satisfy`、`verify`、`refine`、`connect` 等关系。
-4. 点击“保存快照”，将当前模型提交到 MMS。
-5. 在“追踪矩阵”和“SysML 语义校验”中检查需求闭环。
-6. 在”文档生成”中编辑 DocGen 模板并生成 HTML、Markdown、PDF、Word (DOCX)。
-7. 使用导出或 `tools/mdk_sync.py` 与外部工具交换模型结构，或导入分析/仿真工具产生的验证证据。
-
-## MDK 适配器结构
-
-当前 MDK 不再按“文件解析器”罗列能力，而是按工程语义分为两类：
+MDK（Model Development Kits）用于连接外部建模、分析和仿真工具与 MMS。为了避免把系统误解为多个文件解析器，本项目将 MDK 适配器按工程语义分为两类：模型来源适配器和验证证据来源适配器。
 
 | 类别 | 适配器 | 当前能力 |
 | --- | --- | --- |
-| 模型来源 | SysML JSON Exchange | 导入/导出系统内部或外部工具产生的结构化 JSON 模型。 |
-| 模型来源 | XMI / Cameo Export | 导入标准 XMI，也支持 Cameo/MagicDraw 导出的 XMI 文件。当前不是 Cameo 原生插件或双向同步。 |
-| 模型来源 | SysML v2 Text / SysON | 导入轻量 SysML v2 / SysON 文本模型子集。 |
-| 验证证据来源 | Jupyter Analysis Evidence | 导入 Notebook 中的分析结果、验证关系和需求验证证据。 |
-| 验证证据来源 | MATLAB Simulation Evidence | 导入 MATLAB 脚本中的仿真结果、测试用例和验证证据。 |
+| 模型来源 | SysML JSON Exchange | 导入/导出结构化 JSON 模型 |
+| 模型来源 | XMI / Cameo Export | 导入标准 XMI，也支持 Cameo/MagicDraw 导出的 XMI 文件 |
+| 模型来源 | SysML v2 Text / SysON | 导入轻量 SysML v2 / SysON 文本模型 |
+| 验证证据来源 | Jupyter Analysis Evidence | 导入 Notebook 中的分析结果、验证关系和需求验证证据 |
+| 验证证据来源 | MATLAB Simulation Evidence | 导入 MATLAB 脚本中的仿真结果、测试用例和验证证据 |
 
-## MDK 命令行示例
+说明：当前系统支持 Cameo/MagicDraw 导出的 XMI 文件级导入，但尚未实现真正的 Cameo 原生插件和双向同步。Jupyter 和 MATLAB 也以文件级验证证据导入为主，不宣称已完成工具内插件。
 
-```powershell
-python tools/mdk_sync.py parse --file data/import_example.json --tool json
-python tools/mdk_sync.py push --file data/import_example.json --tool json --commit --validate
-python tools/mdk_sync.py push --file data/upload_graph_test.xmi --tool xmi --commit --validate
-python tools/mdk_sync.py push --file mdk/jupyter/example_analysis.ipynb --tool jupyter --commit --validate
-python tools/mdk_sync.py push --file mdk/matlab/example_analysis.m --tool matlab --commit --validate
-python tools/mdk_sync.py pull --format json --out data/exported_model.json
-python tools/mdk_sync.py pull --format xmi --out data/exported_model.xmi
-python tools/mdk_sync.py generate --format pdf --out data/generated_document.pdf
-python tools/mdk_sync.py generate --format docx --out data/generated_document.docx
-```
+### 4. DocGen 文档生成管理
 
-更多外部工具集成方式见 [docs/mdk.md](docs/mdk.md)。
+DocGen 根据 MMS 中的模型数据、视图和追踪关系生成工程文档。用户可以通过模板标记引用模型元素字段、需求表、结构表、验证表、追踪矩阵和语义校验结果。
 
-## DocGen 模板标记
+当前支持输出：
+
+- Markdown
+- HTML
+- PDF
+- Word DOCX
+
+常用模板标记：
 
 | 标记 | 作用 |
 | --- | --- |
@@ -105,23 +85,57 @@ python tools/mdk_sync.py generate --format docx --out data/generated_document.do
 | `{{trace:matrix}}` | 生成需求追踪矩阵 |
 | `{{validation:issues}}` | 生成语义校验结果 |
 
-## 目录说明
+## 快速运行
+
+```powershell
+python -m pip install -r requirements.txt
+
+cd frontend
+npm install
+npm run build
+
+cd ..
+python server.py --host 127.0.0.1 --port 8000
+```
+
+访问系统：
 
 ```text
-server.py                  FastAPI 启动入口
-sysml_docgen/app.py        REST API：MMS / VE / MDK / DocGen
-sysml_docgen/store.py      SQLite 模型仓库、版本和审计
-sysml_docgen/metamodel.py  SysML 元模型、校验和图数据
-sysml_docgen/docgen.py     模板渲染、追踪矩阵和文档输出（基于 Pandoc）
-sysml_docgen/mdk.py        MDK 客户端和工具适配器
-sysml_docgen/xmi.py        JSON/XMI 交换
-static/                    Web VE
-tools/mdk_sync.py          MDK 风格同步客户端
-mdk/jupyter/               Jupyter 集成 helper 和示例
-mdk/matlab/                MATLAB 集成函数和示例
-data/sample_project.json   卫星电源系统示例模型
-outputs/                   运行时生成的文档输出
-tests/                     单元测试与接口测试
+http://127.0.0.1:8000
+```
+
+OpenAPI 文档：
+
+```text
+http://127.0.0.1:8000/docs
+```
+
+如果 `frontend/dist` 不存在，后端会提示前端构建产物缺失。请在 `frontend` 目录执行 `npm install` 和 `npm run build`。
+
+## 演示账号
+
+| 用户 | 密码 | 说明 |
+| --- | --- | --- |
+| `teacher` | `teacher123` | 独立示例工作区 |
+| `engineer` | `engineer123` | 独立示例工作区 |
+| `reviewer` | `reviewer123` | 独立示例工作区 |
+
+## MDK 测试文件
+
+测试文件位于：
+
+```text
+data/mdk_tests/
+```
+
+示例命令：
+
+```powershell
+python tools/mdk_sync.py parse --file data/mdk_tests/model_exchange.json --tool json
+python tools/mdk_sync.py push --file data/mdk_tests/cameo_export.xmi --tool xmi --commit --validate
+python tools/mdk_sync.py push --file data/mdk_tests/syson_model.sysml --tool sysmlv2 --commit --validate
+python tools/mdk_sync.py push --file data/mdk_tests/jupyter_analysis_evidence.ipynb --tool jupyter --commit --validate
+python tools/mdk_sync.py push --file data/mdk_tests/matlab_simulation_evidence.m --tool matlab --commit --validate
 ```
 
 ## 测试
@@ -130,13 +144,20 @@ tests/                     单元测试与接口测试
 python -B -m unittest discover -s tests
 ```
 
+前端构建验证：
+
+```powershell
+cd frontend
+npm run build
+```
+
 ## Docker
 
 ```powershell
 docker compose up --build
 ```
 
-Docker Compose 使用 MongoDB 存储；本地直接运行默认使用 SQLite。可通过以下环境变量调整：
+默认本地运行使用 SQLite。Docker Compose 会启动 MongoDB，可通过环境变量切换：
 
 ```text
 SYSML_STORAGE=sqlite|mongodb
@@ -144,106 +165,28 @@ SYSML_OUTPUT_DIR=outputs
 SYSML_FRONTEND_DIST=frontend/dist
 SYSML_ALLOW_STATIC_FRONTEND=false
 SYSML_MAX_MODEL_BYTES=10485760
-SYSML_PANDOC_PATH=           # 可选，Pandoc 路径
+SYSML_PANDOC_PATH=
 SYSML_PDF_ENGINE=pandoc|wkhtmltopdf|builtin-fallback
-SYSML_DOCX_REFERENCE=        # 可选，Word 参考模板 .docx
+SYSML_DOCX_REFERENCE=
 ```
 
-### Windows 下验证 MongoDB 存储
-
-Docker Desktop 本地运行本项目不需要注册或登录 Docker 账号。若 `docker compose up --build`
-因为 Docker Hub 网络问题无法拉取 `python` 或 `node` 基础镜像，可以先只启动 MongoDB
-容器，再用本地 Python 后端连接 MongoDB 完成数据库验证：
-
-```powershell
-cd C:\Users\86189\Desktop\sysml2
-docker compose up -d mongo
-
-$env:SYSML_STORAGE="mongodb"
-$env:SYSML_MONGO_STRICT="true"
-$env:MONGO_URL="mongodb://127.0.0.1:27017"
-.\.venv-1\Scripts\python.exe server.py --host 127.0.0.1 --port 8000
-```
-
-然后访问：
+## 目录结构
 
 ```text
-http://127.0.0.1:8000/api/ready
+server.py                  FastAPI 启动入口
+sysml_docgen/              后端服务、模型仓库、MDK、DocGen 和 API
+frontend/                  React 前端工作台
+data/mdk_tests/            MDK 导入测试文件
+docs/                      用户手册、API 文档和 MDK 文档
+mdk/                       外部工具示例和辅助脚本
+tests/                     单元测试和接口测试
+tools/mdk_sync.py          MDK 命令行同步工具
+tools/md_to_docx.py        Markdown 转 Word 辅助工具
 ```
 
-如果返回内容中包含以下字段，说明系统已经成功使用 MongoDB：
+## 文档
 
-```json
-{
-  "ready": true,
-  "storage": "mongodb"
-}
-```
-
-也可以用命令行直接验证仓储后端：
-
-```powershell
-$env:SYSML_STORAGE="mongodb"
-$env:SYSML_MONGO_STRICT="true"
-$env:MONGO_URL="mongodb://127.0.0.1:27017"
-.\.venv-1\Scripts\python.exe -c "from sysml_docgen.repository.factory import create_model_store; print(create_model_store().__class__.__name__)"
-```
-
-成功时应输出：
-
-```text
-MongoModelStore
-```
-
-如果 Docker Desktop 弹出 Ubuntu WSL integration 错误，可在弹窗中选择
-`Skip WSL distro integration`，然后进入 Docker Desktop 的
-`Settings -> Resources -> WSL Integration` 关闭 `Ubuntu` 集成。本项目只需要
-Docker Desktop 自身的 Linux 引擎，不依赖 Ubuntu 发行版集成。
-
-PDF 生成默认支持内置 fallback，不依赖系统安装 `wkhtmltopdf`。如果运行环境中存在 `wkhtmltopdf`，系统会自动优先使用它。
-
-### 提升输出质量（推荐）
-
-安装 [Pandoc](https://pandoc.org/) 可显著提升 HTML/PDF/Word 输出质量（参考 [Quarto](https://quarto.org/) 的技术架构）：
-
-```powershell
-# Windows (推荐方式)
-winget install pandoc
-
-# 或使用 Chocolatey
-choco install pandoc
-
-# 高质量 PDF 引擎（可选，三选一）
-pip install weasyprint              # 轻量 HTML/CSS → PDF
-winget install MiKTeX.MiKTeX       # LaTeX → PDF（功能最强）
-winget install wkhtmltopdf          # WebKit → PDF
-```
-
-安装 Pandoc 后，系统将自动启用：
-- **HTML**：语法高亮、智能排版、更丰富的 CSS（斑马纹表格、响应式、打印优化）
-- **PDF**：多引擎支持（WeasyPrint / LaTeX / wkhtmltopdf）
-- **Word (DOCX)**：新增格式，支持参考模板自定义样式（`SYSML_DOCX_REFERENCE`）
-## 协作关系与数据库结构
-
-本系统的协作关系不再依赖固定演示角色，而是用“用户 - 个人工作台 - 共享项目成员”来表达。每个用户登录后都有自己的空工作台；多人协作时，通过共享项目的成员列表决定谁能访问、谁能编辑。
-
-核心数据结构如下：
-
-- `users`：保存登录账号、密码哈希、显示名、账号角色等身份信息。
-- `projects`：保存项目本体。关键字段包括 `id`、`name`、`owner`、`visibility`、`kind`、`members`、`source_project_id`、`published_from`、`copied_from` 等。
-- `members`：项目内的协作成员列表，存放在项目数据中，格式为 `[{ "username": "teacher1", "role": "editor" }]`。
-- `branches` / `elements` / `commits` / `documents`：都挂在项目下面，个人工作台、共享项目、个人副本使用同一套模型结构。
-
-成员权限规则：
-
-- `owner`：项目所有者，可以编辑、发布、复制和管理项目。
-- `editor`：协作者，可以共同创建和修改模型元素。
-- `viewer`：只读成员，可以查看共享项目，但不能写入。
-
-协作流程：
-
-1. **新建共享项目**：进入“项目管理”，点击“新建共享项目”，填写成员，例如 `teacher1:editor, reviewer:viewer`。项目会以 `visibility=shared`、`kind=shared` 保存。
-2. **发布到共享库**：在个人工作台或个人副本中点击“发布到共享库”，系统会复制当前项目内容，生成一个共享项目，并记录 `published_from`、`published_by`、`published_at`。
-3. **从共享库复制到个人工作台**：共享项目成员可以点击“复制到我的工作台”，系统会生成一个私有副本，记录 `copied_from`、`copied_by`、`copied_at`。之后该副本只属于复制者本人。
-
-也就是说，用户之间是否为“队友”，由共享项目的 `members` 字段决定；不是队友就看不到项目，是 `viewer` 就只能看，是 `editor` 才能共同编辑。
+- [用户手册](docs/user-manual.md)
+- [API 文档](docs/api.md)
+- [MDK 集成说明](docs/mdk.md)
+- [课程设计报告](docs/course-design-report.md)

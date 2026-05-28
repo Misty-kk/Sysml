@@ -175,7 +175,7 @@ GET /api/projects/{projectId}/branches/{branch}/export?format=xmi
 
 前端部署规则：
 
-- 默认服务 `static/` 中的 Web VE。
+- 默认服务 `frontend/dist` 中的 React 工作台构建产物。
 - 如需替换为其他前端构建产物，可将 `SYSML_FRONTEND_DIST` 指向包含 `index.html` 的目录。
 
 ## DocGen 文档接口
